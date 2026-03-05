@@ -1,0 +1,1467 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use eframe::egui::{self, Color32, RichText, TextEdit};
+
+use crate::app_support::{
+    ImportScanResult, ImportSummary, ImportedEnvironment, build_curl_command, create_id,
+    create_security_metadata, default_endpoints, default_environment_index, default_environments,
+    default_postman_directories, deserialize_workspace_bundle, endpoint_dedup_key, execute_request,
+    merge_endpoint_details, method_color, non_empty_trimmed, normalize_folder_path,
+    resolve_folder_path_from_lookup, resolve_placeholders, scan_postman_directory,
+    serialize_workspace_bundle, verify_password,
+};
+use crate::models::{
+    AppConfig, BODY_MODE_OPTIONS, Endpoint, Environment, EnvironmentIndexEntry, KeyMaterial,
+    KeyValue, METHOD_OPTIONS, ResponseState, SecurityMetadata, SharedEnvironment,
+    SharedWorkspacePayload,
+};
+use crate::request_body::{normalize_body_mode, normalize_body_mode_owned};
+use crate::storage::{AppStorage, CoreData};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppPhase {
+    SetupPassword,
+    UnlockPassword,
+    Ready,
+}
+
+pub(crate) struct MailmanApp {
+    storage: AppStorage,
+    phase: AppPhase,
+    security_metadata: Option<SecurityMetadata>,
+    key_material: Option<KeyMaterial>,
+
+    endpoints: Vec<Endpoint>,
+    pending_environment_index: Vec<EnvironmentIndexEntry>,
+    environments: Vec<Environment>,
+
+    selected_endpoint_id: Option<String>,
+    selected_environment_id: Option<String>,
+    config: AppConfig,
+
+    setup_password: String,
+    setup_password_confirm: String,
+    unlock_password: String,
+    auth_message: String,
+
+    response: ResponseState,
+    response_body_view: String,
+    status_line: String,
+    dirty: bool,
+    last_mutation: Instant,
+    in_flight: bool,
+    response_rx: Option<Receiver<ResponseState>>,
+
+    new_environment_name: String,
+    postman_import_path: String,
+    postman_workspace_filter: String,
+    show_environment_panel: bool,
+    confirm_delete_all_requests: bool,
+    show_export_bundle_dialog: bool,
+    export_bundle_password: String,
+    export_bundle_password_confirm: String,
+    show_import_bundle_dialog: bool,
+    import_bundle_path: Option<PathBuf>,
+    import_bundle_password: String,
+}
+
+impl MailmanApp {
+    pub(crate) fn new() -> Self {
+        let storage = AppStorage::new();
+
+        let (core_data, mut status_line) = match storage.load_core_data() {
+            Ok(data) => (data, String::new()),
+            Err(err) => (
+                CoreData {
+                    endpoints: default_endpoints(),
+                    environment_index: default_environment_index(),
+                    config: AppConfig::default(),
+                },
+                format!("Failed to load persisted data, using defaults: {err}"),
+            ),
+        };
+
+        let security_metadata = match storage.load_security_metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                if status_line.is_empty() {
+                    status_line = format!("Failed to read security metadata: {err}");
+                }
+                None
+            }
+        };
+
+        let phase = if security_metadata.is_some() {
+            AppPhase::UnlockPassword
+        } else {
+            AppPhase::SetupPassword
+        };
+
+        Self {
+            storage,
+            phase,
+            security_metadata,
+            key_material: None,
+            endpoints: core_data.endpoints,
+            pending_environment_index: core_data.environment_index,
+            environments: vec![],
+            selected_endpoint_id: core_data.config.selected_endpoint_id.clone(),
+            selected_environment_id: core_data.config.selected_environment_id.clone(),
+            config: core_data.config,
+            setup_password: String::new(),
+            setup_password_confirm: String::new(),
+            unlock_password: String::new(),
+            auth_message: String::new(),
+            response: ResponseState::default(),
+            response_body_view: String::new(),
+            status_line,
+            dirty: false,
+            last_mutation: Instant::now(),
+            in_flight: false,
+            response_rx: None,
+            new_environment_name: String::new(),
+            postman_import_path: String::new(),
+            postman_workspace_filter: String::new(),
+            show_environment_panel: true,
+            confirm_delete_all_requests: false,
+            show_export_bundle_dialog: false,
+            export_bundle_password: String::new(),
+            export_bundle_password_confirm: String::new(),
+            show_import_bundle_dialog: false,
+            import_bundle_path: None,
+            import_bundle_password: String::new(),
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.last_mutation = Instant::now();
+    }
+
+    fn ensure_selected_ids(&mut self) {
+        if self
+            .selected_endpoint_id
+            .as_ref()
+            .and_then(|id| self.endpoints.iter().find(|item| &item.id == id))
+            .is_none()
+        {
+            self.selected_endpoint_id = self.endpoints.first().map(|item| item.id.clone());
+        }
+
+        if self
+            .selected_environment_id
+            .as_ref()
+            .and_then(|id| self.environments.iter().find(|item| &item.id == id))
+            .is_none()
+        {
+            self.selected_environment_id = self.environments.first().map(|item| item.id.clone());
+        }
+    }
+
+    fn try_auto_save(&mut self) {
+        if self.phase != AppPhase::Ready || !self.dirty {
+            return;
+        }
+        if self.last_mutation.elapsed() < Duration::from_millis(350) {
+            return;
+        }
+
+        let Some(key) = self.key_material.as_ref() else {
+            self.status_line = "Cannot save: app is locked.".to_owned();
+            return;
+        };
+
+        self.config.selected_endpoint_id = self.selected_endpoint_id.clone();
+        self.config.selected_environment_id = self.selected_environment_id.clone();
+
+        match self
+            .storage
+            .save_all(&self.endpoints, &self.environments, &self.config, key)
+        {
+            Ok(_) => {
+                self.status_line = format!("Saved to {}", self.storage.base_dir.display());
+                self.dirty = false;
+            }
+            Err(err) => {
+                self.status_line = format!("Save failed: {err}");
+            }
+        }
+    }
+
+    fn selected_endpoint_index(&self) -> Option<usize> {
+        let selected = self.selected_endpoint_id.as_ref()?;
+        self.endpoints.iter().position(|item| &item.id == selected)
+    }
+
+    fn selected_environment_index(&self) -> Option<usize> {
+        let selected = self.selected_environment_id.as_ref()?;
+        self.environments
+            .iter()
+            .position(|item| &item.id == selected)
+    }
+
+    fn selected_environment_variables(&self) -> BTreeMap<String, String> {
+        let mut variables = BTreeMap::new();
+        let Some(index) = self.selected_environment_index() else {
+            return variables;
+        };
+
+        for kv in &self.environments[index].variables {
+            let key = kv.key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            variables.insert(key.to_owned(), kv.value.clone());
+        }
+
+        variables
+    }
+
+    fn handle_setup_password_submission(&mut self) {
+        let password = self.setup_password.clone();
+        let confirm = self.setup_password_confirm.clone();
+
+        if password.chars().count() < 12 {
+            self.auth_message = "Password must be at least 12 characters.".to_owned();
+            return;
+        }
+        if password != confirm {
+            self.auth_message = "Password confirmation does not match.".to_owned();
+            return;
+        }
+
+        let (metadata, key) = match create_security_metadata(&password) {
+            Ok(result) => result,
+            Err(err) => {
+                self.auth_message = format!("Failed to configure encryption: {err}");
+                return;
+            }
+        };
+
+        if let Err(err) = self.storage.save_security_metadata(&metadata) {
+            self.auth_message = format!("Failed to persist security metadata: {err}");
+            return;
+        }
+
+        self.security_metadata = Some(metadata);
+        self.setup_password.clear();
+        self.setup_password_confirm.clear();
+
+        if let Err(err) = self.complete_unlock(key) {
+            self.auth_message = err;
+            return;
+        }
+
+        self.auth_message = String::new();
+        self.phase = AppPhase::Ready;
+    }
+
+    fn handle_unlock_password_submission(&mut self) {
+        let Some(metadata) = self.security_metadata.as_ref() else {
+            self.auth_message = "Missing security metadata; restart app.".to_owned();
+            return;
+        };
+
+        let key = match verify_password(&self.unlock_password, metadata) {
+            Ok(key) => key,
+            Err(err) => {
+                self.auth_message = format!("Invalid password: {err}");
+                return;
+            }
+        };
+
+        self.unlock_password.clear();
+        if let Err(err) = self.complete_unlock(key) {
+            self.auth_message = err;
+            return;
+        }
+
+        self.auth_message = String::new();
+        self.phase = AppPhase::Ready;
+    }
+
+    fn complete_unlock(&mut self, key: KeyMaterial) -> Result<(), String> {
+        let (mut environments, found_legacy_plaintext) = self
+            .storage
+            .load_environments(&self.pending_environment_index, &key)
+            .map_err(|err| format!("Failed to load encrypted environments: {err}"))?;
+
+        if environments.is_empty() {
+            environments = default_environments();
+            self.mark_dirty();
+        }
+
+        self.environments = environments;
+        self.key_material = Some(key);
+        self.ensure_selected_ids();
+
+        if found_legacy_plaintext {
+            self.status_line =
+                "Detected legacy plaintext environment files. They will be re-encrypted."
+                    .to_owned();
+            self.mark_dirty();
+        }
+
+        if !self.config.postman_preseed_done {
+            let summary = self.import_postman_from_defaults(None);
+            self.config.postman_preseed_done = true;
+            self.mark_dirty();
+            if summary.files_scanned > 0 {
+                self.status_line = summary.to_message();
+            } else {
+                self.status_line =
+                    "No Postman data found for auto-import in default folders.".to_owned();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn add_endpoint(&mut self) {
+        let id = create_id("ep");
+        self.endpoints.push(Endpoint {
+            id: id.clone(),
+            source_request_id: String::new(),
+            source_collection_id: String::new(),
+            source_folder_id: String::new(),
+            name: "New Request".to_owned(),
+            collection: "General".to_owned(),
+            folder_path: String::new(),
+            method: "GET".to_owned(),
+            url: "https://${api_host}/v1/health".to_owned(),
+            headers: vec![],
+            body_mode: "none".to_owned(),
+            body: String::new(),
+        });
+        self.selected_endpoint_id = Some(id);
+        self.mark_dirty();
+    }
+
+    fn delete_selected_endpoint(&mut self) {
+        let Some(index) = self.selected_endpoint_index() else {
+            return;
+        };
+        self.endpoints.remove(index);
+        self.selected_endpoint_id = self.endpoints.first().map(|item| item.id.clone());
+        self.mark_dirty();
+    }
+
+    fn delete_all_requests(&mut self) {
+        let removed = self.endpoints.len();
+        self.endpoints.clear();
+        self.selected_endpoint_id = None;
+        self.config.selected_endpoint_id = None;
+        self.mark_dirty();
+        self.status_line = format!("Cleared {removed} requests.");
+    }
+
+    fn add_environment(&mut self, name: String) {
+        let id = create_id("env");
+        self.environments.push(Environment {
+            id: id.clone(),
+            name,
+            file_name: format!("{id}.json"),
+            variables: vec![
+                KeyValue {
+                    key: "api_host".to_owned(),
+                    value: "localhost:8080".to_owned(),
+                },
+                KeyValue {
+                    key: "token".to_owned(),
+                    value: "replace-me".to_owned(),
+                },
+            ],
+        });
+        self.selected_environment_id = Some(id);
+        self.mark_dirty();
+    }
+
+    fn delete_selected_environment(&mut self) {
+        if self.environments.len() <= 1 {
+            self.status_line = "At least one environment must exist.".to_owned();
+            return;
+        }
+
+        let Some(index) = self.selected_environment_index() else {
+            return;
+        };
+        self.environments.remove(index);
+        self.selected_environment_id = self.environments.first().map(|item| item.id.clone());
+        self.mark_dirty();
+    }
+
+    fn send_selected_request(&mut self) {
+        if self.in_flight {
+            return;
+        }
+
+        let Some(endpoint_index) = self.selected_endpoint_index() else {
+            self.status_line = "Select an endpoint first.".to_owned();
+            return;
+        };
+
+        let endpoint = self.endpoints[endpoint_index].clone();
+        let env_vars = self.selected_environment_variables();
+        let (tx, rx) = mpsc::channel();
+
+        self.in_flight = true;
+        self.response.clear_for_request();
+        self.response_body_view.clear();
+        self.response_rx = Some(rx);
+        self.status_line = format!("Sending {} {}", endpoint.method, endpoint.url);
+
+        thread::spawn(move || {
+            let state = execute_request(endpoint, env_vars);
+            let _ = tx.send(state);
+        });
+    }
+
+    fn copy_curl_for_selected_request(&mut self, ctx: &egui::Context) {
+        let Some(endpoint_index) = self.selected_endpoint_index() else {
+            self.status_line = "Select an endpoint first.".to_owned();
+            return;
+        };
+
+        let endpoint = self.endpoints[endpoint_index].clone();
+        let env_vars = self.selected_environment_variables();
+        let curl = build_curl_command(&endpoint, &env_vars);
+        ctx.copy_text(curl);
+        self.status_line = format!("Copied cURL for {} {}", endpoint.method, endpoint.name);
+    }
+
+    fn poll_response_channel(&mut self) {
+        let Some(rx) = &self.response_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(response_state) => {
+                self.response = response_state;
+                self.response_body_view = self.response.body.clone();
+                self.in_flight = false;
+                self.response_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.in_flight = false;
+                self.response_rx = None;
+                self.response.error = Some("Request worker disconnected.".to_owned());
+                self.response_body_view.clear();
+            }
+        }
+    }
+
+    fn import_postman_from_defaults(
+        &mut self,
+        workspace_name_filter: Option<&str>,
+    ) -> ImportSummary {
+        let mut summary = ImportSummary::default();
+
+        for dir in default_postman_directories() {
+            let scan_result = scan_postman_directory(&dir, workspace_name_filter);
+            let merge_summary = self.merge_postman_import(scan_result);
+            summary.directories_scanned += 1;
+            summary.files_scanned += merge_summary.files_scanned;
+            summary.endpoints_added += merge_summary.endpoints_added;
+            summary.endpoints_updated += merge_summary.endpoints_updated;
+            summary.environments_added += merge_summary.environments_added;
+            summary.environment_variables_merged += merge_summary.environment_variables_merged;
+        }
+
+        summary
+    }
+
+    fn import_postman_from_path(
+        &mut self,
+        path: &Path,
+        workspace_name_filter: Option<&str>,
+    ) -> ImportSummary {
+        if !path.exists() {
+            return ImportSummary {
+                files_scanned: 0,
+                endpoints_added: 0,
+                endpoints_updated: 0,
+                environments_added: 0,
+                environment_variables_merged: 0,
+                directories_scanned: 1,
+            };
+        }
+
+        let scan_result = scan_postman_directory(path, workspace_name_filter);
+        let mut summary = self.merge_postman_import(scan_result);
+
+        if workspace_name_filter.is_some()
+            && summary.endpoints_added == 0
+            && summary.endpoints_updated == 0
+            && summary.environments_added == 0
+            && summary.environment_variables_merged == 0
+        {
+            let fallback_scan_result = scan_postman_directory(path, None);
+            let fallback_summary = self.merge_postman_import(fallback_scan_result);
+
+            summary.files_scanned += fallback_summary.files_scanned;
+            summary.endpoints_added += fallback_summary.endpoints_added;
+            summary.endpoints_updated += fallback_summary.endpoints_updated;
+            summary.environments_added += fallback_summary.environments_added;
+            summary.environment_variables_merged += fallback_summary.environment_variables_merged;
+        }
+
+        summary.directories_scanned = 1;
+        summary
+    }
+
+    fn merge_postman_import(&mut self, mut scan_result: ImportScanResult) -> ImportSummary {
+        let mut summary = ImportSummary {
+            files_scanned: scan_result.files_scanned,
+            ..ImportSummary::default()
+        };
+
+        let mut endpoint_key_to_index = self
+            .endpoints
+            .iter()
+            .enumerate()
+            .map(|(index, endpoint)| (endpoint_dedup_key(endpoint), index))
+            .collect::<BTreeMap<_, _>>();
+
+        for endpoint in &mut scan_result.endpoints {
+            if endpoint.collection.trim().is_empty() || endpoint.collection.trim() == "General" {
+                if let Some(collection_name) = scan_result
+                    .collection_names_by_id
+                    .get(endpoint.source_collection_id.trim())
+                {
+                    endpoint.collection = collection_name.clone();
+                }
+            }
+
+            if endpoint.folder_path.trim().is_empty() {
+                if let Some(folder_path) = resolve_folder_path_from_lookup(
+                    endpoint.source_folder_id.trim(),
+                    &scan_result.folders_by_id,
+                ) {
+                    endpoint.folder_path = folder_path;
+                }
+            }
+        }
+
+        for mut endpoint in scan_result.endpoints {
+            if endpoint.collection.trim().is_empty() {
+                endpoint.collection = "General".to_owned();
+            }
+            endpoint.folder_path = normalize_folder_path(&endpoint.folder_path);
+            let key = endpoint_dedup_key(&endpoint);
+            if let Some(existing_index) = endpoint_key_to_index.get(&key).copied() {
+                if merge_endpoint_details(&mut self.endpoints[existing_index], endpoint) {
+                    summary.endpoints_updated += 1;
+                }
+                continue;
+            }
+            endpoint_key_to_index.insert(key, self.endpoints.len());
+            self.endpoints.push(endpoint);
+            summary.endpoints_added += 1;
+        }
+
+        for imported_environment in scan_result.environments {
+            let imported_name = imported_environment.name.trim();
+            if imported_name.is_empty() {
+                continue;
+            }
+
+            let existing_index = self
+                .environments
+                .iter()
+                .position(|env| env.name.eq_ignore_ascii_case(imported_name));
+
+            match existing_index {
+                Some(index) => {
+                    let mut existing_keys = self.environments[index]
+                        .variables
+                        .iter()
+                        .map(|kv| kv.key.to_lowercase())
+                        .collect::<BTreeSet<_>>();
+
+                    let mut merged_count = 0usize;
+                    for variable in imported_environment.variables {
+                        let key = variable.key.trim().to_owned();
+                        if key.is_empty() {
+                            continue;
+                        }
+
+                        let lower = key.to_lowercase();
+                        if existing_keys.contains(&lower) {
+                            continue;
+                        }
+                        existing_keys.insert(lower);
+                        self.environments[index].variables.push(variable);
+                        merged_count += 1;
+                    }
+
+                    summary.environment_variables_merged += merged_count;
+                }
+                None => {
+                    let env_id = create_id("env");
+                    self.environments.push(Environment {
+                        id: env_id.clone(),
+                        name: imported_name.to_owned(),
+                        file_name: format!("{env_id}.json"),
+                        variables: imported_environment.variables,
+                    });
+                    summary.environments_added += 1;
+                }
+            }
+        }
+
+        if summary.endpoints_added > 0
+            || summary.endpoints_updated > 0
+            || summary.environments_added > 0
+            || summary.environment_variables_merged > 0
+        {
+            self.ensure_selected_ids();
+            self.mark_dirty();
+        }
+
+        summary
+    }
+
+    fn export_workspace_bundle_to_path(
+        &self,
+        path: &Path,
+        password: &str,
+    ) -> Result<(usize, usize), String> {
+        let payload = SharedWorkspacePayload {
+            version: 1,
+            endpoints: self.endpoints.clone(),
+            environments: self
+                .environments
+                .iter()
+                .map(|env| SharedEnvironment {
+                    name: env.name.clone(),
+                    variables: env.variables.clone(),
+                })
+                .collect(),
+        };
+
+        let encoded = serialize_workspace_bundle(&payload, password)?;
+        fs::write(path, encoded).map_err(|err| format!("Failed to write bundle: {err}"))?;
+
+        Ok((payload.endpoints.len(), payload.environments.len()))
+    }
+
+    fn import_workspace_bundle_from_path(
+        &mut self,
+        path: &Path,
+        password: &str,
+    ) -> Result<ImportSummary, String> {
+        let raw =
+            fs::read_to_string(path).map_err(|err| format!("Failed to read bundle: {err}"))?;
+        let payload = deserialize_workspace_bundle(&raw, password)?;
+
+        if payload.endpoints.is_empty() && payload.environments.is_empty() {
+            return Err("Bundle contains no endpoints or environments.".to_owned());
+        }
+
+        let mut seen_ids = self
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let mut scan_result = ImportScanResult::default();
+        scan_result.endpoints = payload
+            .endpoints
+            .into_iter()
+            .map(|mut endpoint| {
+                endpoint.collection = if endpoint.collection.trim().is_empty() {
+                    "General".to_owned()
+                } else {
+                    endpoint.collection.trim().to_owned()
+                };
+                endpoint.folder_path = normalize_folder_path(&endpoint.folder_path);
+                endpoint.body_mode = normalize_body_mode_owned(&endpoint.body_mode);
+                if endpoint.body_mode == "raw" && endpoint.body.is_empty() {
+                    endpoint.body_mode = "none".to_owned();
+                }
+
+                if endpoint.id.trim().is_empty() || seen_ids.contains(endpoint.id.trim()) {
+                    endpoint.id = create_id("ep");
+                }
+                seen_ids.insert(endpoint.id.clone());
+
+                endpoint
+            })
+            .collect();
+        scan_result.environments = payload
+            .environments
+            .into_iter()
+            .map(|environment| ImportedEnvironment {
+                name: environment.name,
+                variables: environment.variables,
+            })
+            .collect();
+
+        Ok(self.merge_postman_import(scan_result))
+    }
+
+    fn render_share_bundle_dialogs(&mut self, ctx: &egui::Context) {
+        if self.show_export_bundle_dialog {
+            let mut open = self.show_export_bundle_dialog;
+            let mut should_close = false;
+
+            egui::Window::new("Export Workspace Bundle")
+                .open(&mut open)
+                .resizable(false)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label("Create a password-protected bundle that can be imported on any OS.");
+                    ui.add(
+                        TextEdit::singleline(&mut self.export_bundle_password)
+                            .password(true)
+                            .hint_text("Bundle password"),
+                    );
+                    ui.add(
+                        TextEdit::singleline(&mut self.export_bundle_password_confirm)
+                            .password(true)
+                            .hint_text("Confirm bundle password"),
+                    );
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Export").clicked() {
+                            let password = self.export_bundle_password.trim().to_owned();
+                            let confirm = self.export_bundle_password_confirm.trim().to_owned();
+
+                            if password.len() < 8 {
+                                self.status_line =
+                                    "Bundle password must be at least 8 characters.".to_owned();
+                                return;
+                            }
+                            if password != confirm {
+                                self.status_line =
+                                    "Bundle password confirmation does not match.".to_owned();
+                                return;
+                            }
+
+                            let save_target = rfd::FileDialog::new()
+                                .set_title("Export Mail Man Bundle")
+                                .set_file_name("mailman-workspace.mmbundle")
+                                .add_filter("Mail Man Bundle", &["mmbundle", "mailmanbundle"])
+                                .save_file();
+
+                            let Some(path) = save_target else {
+                                self.status_line = "Bundle export canceled.".to_owned();
+                                return;
+                            };
+
+                            match self.export_workspace_bundle_to_path(&path, &password) {
+                                Ok((endpoint_count, environment_count)) => {
+                                    self.status_line = format!(
+                                        "Bundle exported: {} endpoints and {} environments to {}",
+                                        endpoint_count,
+                                        environment_count,
+                                        path.display()
+                                    );
+                                    should_close = true;
+                                }
+                                Err(err) => {
+                                    self.status_line = format!("Bundle export failed: {err}");
+                                }
+                            }
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+
+            self.show_export_bundle_dialog = open && !should_close;
+        }
+
+        if self.show_import_bundle_dialog {
+            let mut open = self.show_import_bundle_dialog;
+            let mut should_close = false;
+            let selected_path = self.import_bundle_path.clone();
+
+            egui::Window::new("Import Workspace Bundle")
+                .open(&mut open)
+                .resizable(false)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    if let Some(path) = selected_path.as_ref() {
+                        ui.label(format!("File: {}", path.display()));
+                    } else {
+                        ui.colored_label(Color32::from_rgb(240, 120, 120), "No bundle file selected.");
+                    }
+
+                    ui.add(
+                        TextEdit::singleline(&mut self.import_bundle_password)
+                            .password(true)
+                            .hint_text("Bundle password"),
+                    );
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Import").clicked() {
+                            let Some(path) = selected_path.as_ref() else {
+                                self.status_line = "Select a bundle file first.".to_owned();
+                                return;
+                            };
+
+                            let password = self.import_bundle_password.trim().to_owned();
+                            match self.import_workspace_bundle_from_path(path, &password) {
+                                Ok(summary) => {
+                                    self.status_line = format!(
+                                        "Bundle import: added {} endpoints, updated {} endpoints, added {} environments, merged {} environment vars.",
+                                        summary.endpoints_added,
+                                        summary.endpoints_updated,
+                                        summary.environments_added,
+                                        summary.environment_variables_merged,
+                                    );
+                                    self.last_mutation = Instant::now() - Duration::from_secs(1);
+                                    self.try_auto_save();
+                                    should_close = true;
+                                }
+                                Err(err) => {
+                                    self.status_line = format!("Bundle import failed: {err}");
+                                }
+                            }
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+
+            self.show_import_bundle_dialog = open && !should_close;
+            if should_close {
+                self.import_bundle_path = None;
+                self.import_bundle_password.clear();
+            }
+        }
+    }
+
+    fn render_auth_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.heading("Mail Man");
+                ui.add_space(8.0);
+
+                match self.phase {
+                    AppPhase::SetupPassword => {
+                        ui.label(
+                            "Set a master password once. Environment variable files are encrypted at rest with Argon2id + XChaCha20-Poly1305.",
+                        );
+                        ui.label(
+                            "The password is never stored and cannot be reversed. If lost, encrypted env files are unrecoverable.",
+                        );
+                        ui.add_space(12.0);
+
+                        ui.add(
+                            TextEdit::singleline(&mut self.setup_password)
+                                .password(true)
+                                .hint_text("Master password"),
+                        );
+                        ui.add(
+                            TextEdit::singleline(&mut self.setup_password_confirm)
+                                .password(true)
+                                .hint_text("Confirm password"),
+                        );
+
+                        if ui.button("Configure Encryption and Open").clicked() {
+                            self.handle_setup_password_submission();
+                        }
+                    }
+                    AppPhase::UnlockPassword => {
+                        ui.label("Enter your master password to decrypt environment variables.");
+                        ui.add_space(12.0);
+                        ui.add(
+                            TextEdit::singleline(&mut self.unlock_password)
+                                .password(true)
+                                .hint_text("Master password"),
+                        );
+
+                        if ui.button("Unlock").clicked() {
+                            self.handle_unlock_password_submission();
+                        }
+                    }
+                    AppPhase::Ready => {}
+                }
+
+                if !self.auth_message.is_empty() {
+                    ui.add_space(10.0);
+                    ui.colored_label(Color32::from_rgb(240, 120, 120), &self.auth_message);
+                }
+
+                if !self.status_line.is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(&self.status_line);
+                }
+            });
+        });
+    }
+
+    fn render_toolbar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Mail Man").strong().size(18.0));
+                ui.separator();
+                ui.label("Environment:");
+
+                let selected_name = self
+                    .selected_environment_index()
+                    .and_then(|idx| self.environments.get(idx))
+                    .map(|env| env.name.as_str())
+                    .unwrap_or("None");
+
+                egui::ComboBox::from_id_salt("environment-switcher")
+                    .selected_text(selected_name)
+                    .show_ui(ui, |ui| {
+                        let mut selection_changed = false;
+                        for env in &self.environments {
+                            let selected =
+                                self.selected_environment_id.as_deref() == Some(env.id.as_str());
+                            if ui.selectable_label(selected, &env.name).clicked() {
+                                self.selected_environment_id = Some(env.id.clone());
+                                selection_changed = true;
+                            }
+                        }
+                        if selection_changed {
+                            self.mark_dirty();
+                        }
+                    });
+
+                ui.add(
+                    TextEdit::singleline(&mut self.new_environment_name)
+                        .hint_text("new env (qa, sandbox)"),
+                );
+                if ui.button("Add Env").clicked() {
+                    let name = self.new_environment_name.trim().to_owned();
+                    if !name.is_empty() {
+                        self.add_environment(name);
+                        self.new_environment_name.clear();
+                    }
+                }
+                if ui.button("Delete Env").clicked() {
+                    self.delete_selected_environment();
+                }
+
+                ui.separator();
+                let send_button = ui.add_enabled(
+                    !self.in_flight,
+                    egui::Button::new(if self.in_flight { "Sending..." } else { "Send" }),
+                );
+                if send_button.clicked() {
+                    self.send_selected_request();
+                }
+                if ui.button("Copy cURL").clicked() {
+                    self.copy_curl_for_selected_request(ctx);
+                }
+                if ui
+                    .button(if self.show_environment_panel {
+                        "Hide Env Panel"
+                    } else {
+                        "Show Env Panel"
+                    })
+                    .clicked()
+                {
+                    self.show_environment_panel = !self.show_environment_panel;
+                }
+
+                ui.separator();
+                if ui.button("Import Postman (auto)").clicked() {
+                    let workspace_filter =
+                        non_empty_trimmed(&self.postman_workspace_filter).map(str::to_owned);
+                    let summary = self.import_postman_from_defaults(workspace_filter.as_deref());
+                    self.status_line = summary.to_message();
+                }
+
+                ui.add(
+                    TextEdit::singleline(&mut self.postman_workspace_filter)
+                        .hint_text("Workspace (e.g. Inspace Workspace)"),
+                );
+                ui.add(
+                    TextEdit::singleline(&mut self.postman_import_path)
+                        .hint_text("/path/to/Postman"),
+                );
+                if ui.button("Import Path").clicked() {
+                    let path = PathBuf::from(self.postman_import_path.trim());
+                    let workspace_filter =
+                        non_empty_trimmed(&self.postman_workspace_filter).map(str::to_owned);
+                    let summary = self.import_postman_from_path(&path, workspace_filter.as_deref());
+                    self.status_line = summary.to_message();
+                }
+
+                if ui.button("Export Bundle").clicked() {
+                    self.show_export_bundle_dialog = true;
+                    self.export_bundle_password.clear();
+                    self.export_bundle_password_confirm.clear();
+                }
+
+                if ui.button("Import Bundle").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Import Mail Man Bundle")
+                        .add_filter("Mail Man Bundle", &["mmbundle", "mailmanbundle", "json"])
+                        .pick_file()
+                    {
+                        self.import_bundle_path = Some(path);
+                        self.import_bundle_password.clear();
+                        self.show_import_bundle_dialog = true;
+                    }
+                }
+
+                if !self.confirm_delete_all_requests {
+                    if ui.button("Delete All Requests").clicked() {
+                        self.confirm_delete_all_requests = true;
+                    }
+                } else {
+                    ui.colored_label(Color32::from_rgb(240, 120, 120), "Confirm clear all?");
+                    if ui.button("Yes, Delete All").clicked() {
+                        self.delete_all_requests();
+                        self.confirm_delete_all_requests = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_delete_all_requests = false;
+                    }
+                }
+
+                if ui.button("Save Now").clicked() {
+                    self.last_mutation = Instant::now() - Duration::from_secs(1);
+                    self.try_auto_save();
+                }
+            });
+        });
+    }
+
+    fn render_endpoints_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("endpoints")
+            .resizable(true)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("Requests");
+                    if ui.button("+").clicked() {
+                        self.add_endpoint();
+                    }
+                    if ui.button("-").clicked() {
+                        self.delete_selected_endpoint();
+                    }
+                });
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let mut selection_changed = false;
+                    let mut grouped: BTreeMap<String, BTreeMap<String, Vec<usize>>> =
+                        BTreeMap::new();
+                    for (index, endpoint) in self.endpoints.iter().enumerate() {
+                        let collection = non_empty_trimmed(&endpoint.collection)
+                            .unwrap_or("General")
+                            .to_owned();
+                        let folder = endpoint.folder_path.trim().to_owned();
+                        grouped
+                            .entry(collection)
+                            .or_default()
+                            .entry(folder)
+                            .or_default()
+                            .push(index);
+                    }
+
+                    for (collection, folders) in grouped {
+                        ui.collapsing(collection, |ui| {
+                            for (folder, indexes) in folders {
+                                if folder.is_empty() {
+                                    for endpoint_index in indexes {
+                                        let endpoint = &self.endpoints[endpoint_index];
+                                        let is_selected = self.selected_endpoint_id.as_deref()
+                                            == Some(endpoint.id.as_str());
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(
+                                                method_color(&endpoint.method),
+                                                &endpoint.method,
+                                            );
+                                            if ui
+                                                .selectable_label(is_selected, &endpoint.name)
+                                                .clicked()
+                                            {
+                                                self.selected_endpoint_id =
+                                                    Some(endpoint.id.clone());
+                                                selection_changed = true;
+                                            }
+                                        });
+                                    }
+                                } else {
+                                    ui.collapsing(folder, |ui| {
+                                        for endpoint_index in indexes {
+                                            let endpoint = &self.endpoints[endpoint_index];
+                                            let is_selected = self.selected_endpoint_id.as_deref()
+                                                == Some(endpoint.id.as_str());
+                                            ui.horizontal(|ui| {
+                                                ui.colored_label(
+                                                    method_color(&endpoint.method),
+                                                    &endpoint.method,
+                                                );
+                                                if ui
+                                                    .selectable_label(is_selected, &endpoint.name)
+                                                    .clicked()
+                                                {
+                                                    self.selected_endpoint_id =
+                                                        Some(endpoint.id.clone());
+                                                    selection_changed = true;
+                                                }
+                                            });
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    }
+
+                    if selection_changed {
+                        self.mark_dirty();
+                    }
+                });
+            });
+    }
+
+    fn render_environment_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("environments")
+            .resizable(true)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.heading("Environment Variables");
+                ui.label("Each environment is stored in its own encrypted offline file.");
+                ui.separator();
+
+                let Some(index) = self.selected_environment_index() else {
+                    ui.label("No environment selected.");
+                    return;
+                };
+
+                let mut changed = false;
+                let mut remove_index: Option<usize> = None;
+
+                {
+                    let env = &mut self.environments[index];
+
+                    if ui.text_edit_singleline(&mut env.name).changed() {
+                        changed = true;
+                    }
+                    ui.label(format!("File: {}", env.file_name));
+                    ui.separator();
+
+                    for (variable_index, variable) in env.variables.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(TextEdit::singleline(&mut variable.key).hint_text("key"))
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                            if ui
+                                .add(TextEdit::singleline(&mut variable.value).hint_text("value"))
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                            if ui.button("x").clicked() {
+                                remove_index = Some(variable_index);
+                            }
+                        });
+                    }
+
+                    if let Some(variable_index) = remove_index {
+                        env.variables.remove(variable_index);
+                        changed = true;
+                    }
+
+                    if ui.button("+ Add Variable").clicked() {
+                        env.variables.push(KeyValue::default());
+                        changed = true;
+                    }
+                }
+
+                if changed {
+                    self.mark_dirty();
+                }
+            });
+    }
+
+    fn render_request_editor(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.heading("Request Builder");
+                    ui.separator();
+
+                    let Some(index) = self.selected_endpoint_index() else {
+                        ui.label("Select a request from the left panel.");
+                        return;
+                    };
+
+                    let mut changed = false;
+                    let mut remove_header_index: Option<usize> = None;
+                    let preview_url;
+
+                    {
+                        let endpoint = &mut self.endpoints[index];
+
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            if ui
+                                .add(
+                                    TextEdit::singleline(&mut endpoint.name)
+                                        .desired_width(f32::INFINITY),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Collection");
+                            if ui
+                                .add(
+                                    TextEdit::singleline(&mut endpoint.collection)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("Inspace API V3"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Folder");
+                            if ui
+                                .add(
+                                    TextEdit::singleline(&mut endpoint.folder_path)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("Micro / Query / Native"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("method-picker")
+                                .selected_text(&endpoint.method)
+                                .show_ui(ui, |ui| {
+                                    for method in METHOD_OPTIONS {
+                                        if ui
+                                            .selectable_label(endpoint.method == method, method)
+                                            .clicked()
+                                        {
+                                            endpoint.method = method.to_owned();
+                                            changed = true;
+                                        }
+                                    }
+                                });
+
+                            if ui
+                                .add(
+                                    TextEdit::singleline(&mut endpoint.url)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("https://${api_host}/resource"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+
+                        ui.separator();
+                        ui.label("Headers");
+                        for (header_index, header) in endpoint.headers.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        TextEdit::singleline(&mut header.key)
+                                            .desired_width(f32::INFINITY)
+                                            .hint_text("Header"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                if ui
+                                    .add(
+                                        TextEdit::singleline(&mut header.value)
+                                            .desired_width(f32::INFINITY)
+                                            .hint_text("Value"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                if ui.button("x").clicked() {
+                                    remove_header_index = Some(header_index);
+                                }
+                            });
+                        }
+
+                        if let Some(header_index) = remove_header_index {
+                            endpoint.headers.remove(header_index);
+                            changed = true;
+                        }
+                        if ui.button("+ Add Header").clicked() {
+                            endpoint.headers.push(KeyValue::default());
+                            changed = true;
+                        }
+
+                        ui.separator();
+                        ui.label("Body");
+                        ui.horizontal(|ui| {
+                            ui.label("Mode");
+                            egui::ComboBox::from_id_salt("body-mode-picker")
+                                .selected_text(normalize_body_mode(&endpoint.body_mode))
+                                .show_ui(ui, |ui| {
+                                    for mode in BODY_MODE_OPTIONS {
+                                        if ui
+                                            .selectable_label(
+                                                normalize_body_mode(&endpoint.body_mode) == mode,
+                                                mode,
+                                            )
+                                            .clicked()
+                                        {
+                                            endpoint.body_mode = mode.to_owned();
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                        });
+                        if ui
+                    .add(
+                        TextEdit::multiline(&mut endpoint.body)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(12)
+                            .hint_text(
+                                "{\n  \"token\": \"${token}\"\n}\nOR\nkey=value\nkey2=value2",
+                            ),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+
+                        preview_url = endpoint.url.clone();
+                    }
+
+                    if changed {
+                        self.mark_dirty();
+                    }
+
+                    ui.separator();
+                    let resolved_url =
+                        resolve_placeholders(&preview_url, &self.selected_environment_variables());
+                    ui.label(format!("Resolved URL (preview): {resolved_url}"));
+                    if ui.button("Copy cURL for Selected Request").clicked() {
+                        self.copy_curl_for_selected_request(ctx);
+                    }
+                    ui.label("Use ${variable_name} placeholders in URL, headers, and body.");
+                });
+        });
+    }
+
+    fn render_response_panel(&mut self, ctx: &egui::Context) {
+        let max_response_height = (ctx.content_rect().height() * 0.60).max(180.0);
+        egui::TopBottomPanel::bottom("response")
+            .resizable(true)
+            .default_height(260.0)
+            .min_height(140.0)
+            .max_height(max_response_height)
+            .show(ctx, |ui| {
+                ui.heading("Response");
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if let Some(error) = &self.response.error {
+                            ui.colored_label(Color32::from_rgb(240, 120, 120), error);
+                        }
+
+                        if let Some(status_code) = self.response.status_code {
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "Status: {status_code} {}",
+                                    self.response.status_text
+                                ));
+                                if let Some(duration) = self.response.duration_ms {
+                                    ui.separator();
+                                    ui.label(format!("Time: {duration} ms"));
+                                }
+                            });
+                        } else if !self.response.status_text.is_empty() {
+                            ui.label(&self.response.status_text);
+                        }
+
+                        if !self.response.headers.is_empty() {
+                            ui.collapsing("Headers", |ui| {
+                                for header in &self.response.headers {
+                                    ui.label(format!("{}: {}", header.key, header.value));
+                                }
+                            });
+                        }
+
+                        ui.separator();
+                        let body_height = ui.available_height().max(120.0);
+                        ui.add_sized(
+                            [ui.available_width(), body_height],
+                            TextEdit::multiline(&mut self.response_body_view)
+                                .desired_width(f32::INFINITY)
+                                .code_editor(),
+                        );
+                    });
+            });
+    }
+
+    fn render_status_line(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("status-line")
+            .exact_height(22.0)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if self.status_line.is_empty() {
+                        ui.label("Ready");
+                    } else {
+                        ui.label(&self.status_line);
+                    }
+                    ui.separator();
+                    ui.label(format!("Storage: {}", self.storage.base_dir.display()));
+                });
+            });
+    }
+}
+
+impl eframe::App for MailmanApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.set_visuals(egui::Visuals::dark());
+
+        if self.phase != AppPhase::Ready {
+            self.render_auth_screen(ctx);
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return;
+        }
+
+        self.poll_response_channel();
+
+        self.render_toolbar(ctx);
+        self.render_endpoints_panel(ctx);
+        if self.show_environment_panel {
+            self.render_environment_panel(ctx);
+        }
+        self.render_request_editor(ctx);
+        self.render_response_panel(ctx);
+        self.render_share_bundle_dialogs(ctx);
+        self.render_status_line(ctx);
+
+        self.try_auto_save();
+        ctx.request_repaint_after(Duration::from_millis(16));
+    }
+}
