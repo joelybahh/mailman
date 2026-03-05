@@ -38,6 +38,12 @@ enum RequestEditorTab {
     Body,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResponseViewTab {
+    Raw,
+    Pretty,
+}
+
 pub(crate) struct MailmanApp {
     storage: AppStorage,
     phase: AppPhase,
@@ -59,6 +65,9 @@ pub(crate) struct MailmanApp {
 
     response: ResponseState,
     response_body_view: String,
+    parsed_response_json: Option<serde_json::Value>,
+    parsed_response_json_error: Option<String>,
+    response_view_tab: ResponseViewTab,
     status_line: String,
     dirty: bool,
     last_mutation: Instant,
@@ -129,6 +138,9 @@ impl MailmanApp {
             auth_message: String::new(),
             response: ResponseState::default(),
             response_body_view: String::new(),
+            parsed_response_json: None,
+            parsed_response_json_error: None,
+            response_view_tab: ResponseViewTab::Raw,
             status_line,
             dirty: false,
             last_mutation: Instant::now(),
@@ -444,6 +456,8 @@ impl MailmanApp {
         self.in_flight = true;
         self.response.clear_for_request();
         self.response_body_view.clear();
+        self.parsed_response_json = None;
+        self.parsed_response_json_error = None;
         self.response_rx = Some(rx);
         self.status_line = format!("Sending {} {}", endpoint.method, endpoint.url);
 
@@ -475,6 +489,7 @@ impl MailmanApp {
             Ok(response_state) => {
                 self.response = response_state;
                 self.response_body_view = self.response.body.clone();
+                self.update_parsed_response_json();
                 self.in_flight = false;
                 self.response_rx = None;
             }
@@ -484,6 +499,115 @@ impl MailmanApp {
                 self.response_rx = None;
                 self.response.error = Some("Request worker disconnected.".to_owned());
                 self.response_body_view.clear();
+                self.parsed_response_json = None;
+                self.parsed_response_json_error = None;
+            }
+        }
+    }
+
+    fn update_parsed_response_json(&mut self) {
+        let body = self.response.body.trim();
+        if body.is_empty() {
+            self.parsed_response_json = None;
+            self.parsed_response_json_error = None;
+            return;
+        }
+
+        match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(value) => {
+                self.parsed_response_json = Some(value);
+                self.parsed_response_json_error = None;
+            }
+            Err(err) => {
+                self.parsed_response_json = None;
+                self.parsed_response_json_error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn render_json_leaf(
+        ui: &mut egui::Ui,
+        key: Option<&str>,
+        value_text: impl Into<String>,
+        value_color: Color32,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(key) = key {
+                ui.label(RichText::new(key).strong());
+                ui.label(":");
+            }
+            ui.label(
+                RichText::new(value_text.into())
+                    .color(value_color)
+                    .monospace(),
+            );
+        });
+    }
+
+    fn render_json_tree(
+        ui: &mut egui::Ui,
+        key: Option<&str>,
+        value: &serde_json::Value,
+        path: &str,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let label = match key {
+                    Some(key) => format!("{key}: Object ({})", map.len()),
+                    None => format!("Object ({})", map.len()),
+                };
+                egui::CollapsingHeader::new(label)
+                    .id_salt(path)
+                    .default_open(path == "$")
+                    .show(ui, |ui| {
+                        for (child_key, child_value) in map {
+                            let child_path = format!("{path}.{child_key}");
+                            Self::render_json_tree(ui, Some(child_key), child_value, &child_path);
+                        }
+                    });
+            }
+            serde_json::Value::Array(items) => {
+                let label = match key {
+                    Some(key) => format!("{key}: Array ({})", items.len()),
+                    None => format!("Array ({})", items.len()),
+                };
+                egui::CollapsingHeader::new(label)
+                    .id_salt(path)
+                    .default_open(path == "$")
+                    .show(ui, |ui| {
+                        for (index, item) in items.iter().enumerate() {
+                            let child_key = format!("[{index}]");
+                            let child_path = format!("{path}[{index}]");
+                            Self::render_json_tree(ui, Some(&child_key), item, &child_path);
+                        }
+                    });
+            }
+            serde_json::Value::String(text) => {
+                Self::render_json_leaf(
+                    ui,
+                    key,
+                    format!("\"{text}\""),
+                    Color32::from_rgb(120, 210, 170),
+                );
+            }
+            serde_json::Value::Number(number) => {
+                Self::render_json_leaf(
+                    ui,
+                    key,
+                    number.to_string(),
+                    Color32::from_rgb(240, 200, 120),
+                );
+            }
+            serde_json::Value::Bool(value) => {
+                Self::render_json_leaf(
+                    ui,
+                    key,
+                    value.to_string(),
+                    Color32::from_rgb(130, 180, 255),
+                );
+            }
+            serde_json::Value::Null => {
+                Self::render_json_leaf(ui, key, "null", Color32::GRAY);
             }
         }
     }
@@ -1573,6 +1697,14 @@ impl MailmanApp {
             .max_height(max_response_height)
             .show(ctx, |ui| {
                 ui.heading("Response");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.response_view_tab, ResponseViewTab::Raw, "Raw");
+                    ui.selectable_value(
+                        &mut self.response_view_tab,
+                        ResponseViewTab::Pretty,
+                        "Pretty",
+                    );
+                });
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -1605,13 +1737,33 @@ impl MailmanApp {
                         }
 
                         ui.separator();
-                        let body_height = ui.available_height().max(120.0);
-                        ui.add_sized(
-                            [ui.available_width(), body_height],
-                            TextEdit::multiline(&mut self.response_body_view)
-                                .desired_width(f32::INFINITY)
-                                .code_editor(),
-                        );
+                        match self.response_view_tab {
+                            ResponseViewTab::Raw => {
+                                let body_height = ui.available_height().max(120.0);
+                                ui.add_sized(
+                                    [ui.available_width(), body_height],
+                                    TextEdit::multiline(&mut self.response_body_view)
+                                        .desired_width(f32::INFINITY)
+                                        .code_editor(),
+                                );
+                            }
+                            ResponseViewTab::Pretty => {
+                                if let Some(value) = &self.parsed_response_json {
+                                    Self::render_json_tree(ui, None, value, "$");
+                                } else if let Some(err) = &self.parsed_response_json_error {
+                                    ui.colored_label(
+                                        Color32::from_rgb(240, 120, 120),
+                                        format!("Response body is not valid JSON: {err}"),
+                                    );
+                                } else if self.response.body.trim().is_empty() {
+                                    ui.label("No response body.");
+                                } else {
+                                    ui.label(
+                                        "Response body is not available in pretty view for this payload.",
+                                    );
+                                }
+                            }
+                        }
                     });
             });
     }
