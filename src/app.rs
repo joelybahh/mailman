@@ -11,9 +11,10 @@ use crate::app_support::{
     ImportScanResult, ImportSummary, ImportedEnvironment, build_curl_command, create_id,
     create_security_metadata, default_endpoints, default_environment_index, default_environments,
     default_postman_directories, deserialize_workspace_bundle, endpoint_dedup_key, execute_request,
-    merge_endpoint_details, method_color, non_empty_trimmed, normalize_folder_path,
-    resolve_folder_path_from_lookup, resolve_placeholders, scan_postman_directory,
-    serialize_workspace_bundle, verify_password,
+    merge_endpoint_details, method_color, non_empty_trimmed,
+    normalize_endpoint_url_and_query_params, normalize_folder_path, resolve_endpoint_url,
+    resolve_folder_path_from_lookup, scan_postman_directory, serialize_workspace_bundle,
+    verify_password,
 };
 use crate::models::{
     AppConfig, BODY_MODE_OPTIONS, Endpoint, Environment, EnvironmentIndexEntry, KeyMaterial,
@@ -28,6 +29,13 @@ enum AppPhase {
     SetupPassword,
     UnlockPassword,
     Ready,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestEditorTab {
+    Params,
+    Headers,
+    Body,
 }
 
 pub(crate) struct MailmanApp {
@@ -68,6 +76,7 @@ pub(crate) struct MailmanApp {
     show_import_bundle_dialog: bool,
     import_bundle_path: Option<PathBuf>,
     import_bundle_password: String,
+    request_editor_tab: RequestEditorTab,
 }
 
 impl MailmanApp {
@@ -135,6 +144,7 @@ impl MailmanApp {
             show_import_bundle_dialog: false,
             import_bundle_path: None,
             import_bundle_password: String::new(),
+            request_editor_tab: RequestEditorTab::Params,
         }
     }
 
@@ -334,6 +344,7 @@ impl MailmanApp {
             folder_path: String::new(),
             method: "GET".to_owned(),
             url: "https://${api_host}/v1/health".to_owned(),
+            query_params: vec![],
             headers: vec![],
             body_mode: "none".to_owned(),
             body: String::new(),
@@ -553,6 +564,7 @@ impl MailmanApp {
                 endpoint.collection = "General".to_owned();
             }
             endpoint.folder_path = normalize_folder_path(&endpoint.folder_path);
+            normalize_endpoint_url_and_query_params(&mut endpoint);
             let key = endpoint_dedup_key(&endpoint);
             if let Some(existing_index) = endpoint_key_to_index.get(&key).copied() {
                 if merge_endpoint_details(&mut self.endpoints[existing_index], endpoint) {
@@ -682,6 +694,7 @@ impl MailmanApp {
                 };
                 endpoint.folder_path = normalize_folder_path(&endpoint.folder_path);
                 endpoint.body_mode = normalize_body_mode_owned(&endpoint.body_mode);
+                normalize_endpoint_url_and_query_params(&mut endpoint);
                 if endpoint.body_mode == "raw" && endpoint.body.is_empty() {
                     endpoint.body_mode = "none".to_owned();
                 }
@@ -1203,8 +1216,9 @@ impl MailmanApp {
                     };
 
                     let mut changed = false;
+                    let mut remove_param_index: Option<usize> = None;
                     let mut remove_header_index: Option<usize> = None;
-                    let preview_url;
+                    let mut request_editor_tab = self.request_editor_tab;
 
                     {
                         let endpoint = &mut self.endpoints[index];
@@ -1273,99 +1287,197 @@ impl MailmanApp {
                                 )
                                 .changed()
                             {
+                                normalize_endpoint_url_and_query_params(endpoint);
                                 changed = true;
                             }
                         });
 
                         ui.separator();
-                        ui.label("Headers");
-                        for (header_index, header) in endpoint.headers.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add(
-                                        TextEdit::singleline(&mut header.key)
-                                            .desired_width(f32::INFINITY)
-                                            .hint_text("Header"),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                if ui
-                                    .add(
-                                        TextEdit::singleline(&mut header.value)
-                                            .desired_width(f32::INFINITY)
-                                            .hint_text("Value"),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                if ui.button("x").clicked() {
-                                    remove_header_index = Some(header_index);
-                                }
-                            });
-                        }
-
-                        if let Some(header_index) = remove_header_index {
-                            endpoint.headers.remove(header_index);
-                            changed = true;
-                        }
-                        if ui.button("+ Add Header").clicked() {
-                            endpoint.headers.push(KeyValue::default());
-                            changed = true;
-                        }
-
-                        ui.separator();
-                        ui.label("Body");
+                        let non_empty_param_count = endpoint
+                            .query_params
+                            .iter()
+                            .filter(|param| !param.key.trim().is_empty())
+                            .count();
+                        let non_empty_header_count = endpoint
+                            .headers
+                            .iter()
+                            .filter(|header| !header.key.trim().is_empty())
+                            .count();
                         ui.horizontal(|ui| {
-                            ui.label("Mode");
-                            egui::ComboBox::from_id_salt("body-mode-picker")
-                                .selected_text(normalize_body_mode(&endpoint.body_mode))
-                                .show_ui(ui, |ui| {
-                                    for mode in BODY_MODE_OPTIONS {
+                            ui.selectable_value(
+                                &mut request_editor_tab,
+                                RequestEditorTab::Params,
+                                format!("Params ({non_empty_param_count})"),
+                            );
+                            ui.selectable_value(
+                                &mut request_editor_tab,
+                                RequestEditorTab::Headers,
+                                format!("Headers ({non_empty_header_count})"),
+                            );
+                            ui.selectable_value(
+                                &mut request_editor_tab,
+                                RequestEditorTab::Body,
+                                "Body",
+                            );
+                        });
+                        ui.separator();
+
+                        match request_editor_tab {
+                            RequestEditorTab::Params => {
+                                ui.small("Query params are appended to the URL when sending.");
+                                for (param_index, param) in endpoint.query_params.iter_mut().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        let row_width = ui.available_width();
+                                        let spacing = ui.spacing().item_spacing.x;
+                                        let remove_width = 24.0_f32;
+                                        let key_width = (row_width * 0.35).clamp(120.0, 260.0);
+                                        let value_width =
+                                            (row_width - key_width - remove_width - (spacing * 2.0))
+                                                .max(120.0);
+
                                         if ui
-                                            .selectable_label(
-                                                normalize_body_mode(&endpoint.body_mode) == mode,
-                                                mode,
+                                            .add_sized(
+                                                [key_width, 0.0],
+                                                TextEdit::singleline(&mut param.key)
+                                                    .hint_text("Param key"),
                                             )
-                                            .clicked()
+                                            .changed()
                                         {
-                                            endpoint.body_mode = mode.to_owned();
                                             changed = true;
                                         }
-                                    }
-                                });
-                        });
-                        if ui
-                    .add(
-                        TextEdit::multiline(&mut endpoint.body)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(12)
-                            .hint_text(
-                                "{\n  \"token\": \"${token}\"\n}\nOR\nkey=value\nkey2=value2",
-                            ),
-                    )
-                    .changed()
-                {
-                    changed = true;
-                }
+                                        if ui
+                                            .add_sized(
+                                                [value_width, 0.0],
+                                                TextEdit::singleline(&mut param.value)
+                                                    .hint_text("Param value"),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                        if ui
+                                            .add_sized([remove_width, 0.0], egui::Button::new("x"))
+                                            .clicked()
+                                        {
+                                            remove_param_index = Some(param_index);
+                                        }
+                                    });
+                                }
 
-                        preview_url = endpoint.url.clone();
+                                if let Some(param_index) = remove_param_index {
+                                    endpoint.query_params.remove(param_index);
+                                    changed = true;
+                                }
+                                if ui.button("+ Add Param").clicked() {
+                                    endpoint.query_params.push(KeyValue::default());
+                                    changed = true;
+                                }
+                            }
+                            RequestEditorTab::Headers => {
+                                ui.small(
+                                    "Name + value (example: Authorization = Bearer ${token})",
+                                );
+                                for (header_index, header) in endpoint.headers.iter_mut().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        let row_width = ui.available_width();
+                                        let spacing = ui.spacing().item_spacing.x;
+                                        let remove_width = 24.0_f32;
+                                        let key_width = (row_width * 0.35).clamp(120.0, 260.0);
+                                        let value_width =
+                                            (row_width - key_width - remove_width - (spacing * 2.0))
+                                                .max(120.0);
+
+                                        if ui
+                                            .add_sized(
+                                                [key_width, 0.0],
+                                                TextEdit::singleline(&mut header.key)
+                                                    .hint_text("Header name"),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                        if ui
+                                            .add_sized(
+                                                [value_width, 0.0],
+                                                TextEdit::singleline(&mut header.value)
+                                                    .hint_text("Header value"),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                        if ui
+                                            .add_sized([remove_width, 0.0], egui::Button::new("x"))
+                                            .clicked()
+                                        {
+                                            remove_header_index = Some(header_index);
+                                        }
+                                    });
+                                }
+
+                                if let Some(header_index) = remove_header_index {
+                                    endpoint.headers.remove(header_index);
+                                    changed = true;
+                                }
+                                if ui.button("+ Add Header").clicked() {
+                                    endpoint.headers.push(KeyValue::default());
+                                    changed = true;
+                                }
+                            }
+                            RequestEditorTab::Body => {
+                                ui.horizontal(|ui| {
+                                    ui.label("Mode");
+                                    egui::ComboBox::from_id_salt("body-mode-picker")
+                                        .selected_text(normalize_body_mode(&endpoint.body_mode))
+                                        .show_ui(ui, |ui| {
+                                            for mode in BODY_MODE_OPTIONS {
+                                                if ui
+                                                    .selectable_label(
+                                                        normalize_body_mode(&endpoint.body_mode)
+                                                            == mode,
+                                                        mode,
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    endpoint.body_mode = mode.to_owned();
+                                                    changed = true;
+                                                }
+                                            }
+                                        });
+                                });
+                                if ui
+                                    .add(
+                                        TextEdit::multiline(&mut endpoint.body)
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(12)
+                                            .hint_text(
+                                                "{\n  \"token\": \"${token}\"\n}\nOR\nkey=value\nkey2=value2",
+                                            ),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        }
                     }
+                    self.request_editor_tab = request_editor_tab;
 
                     if changed {
                         self.mark_dirty();
                     }
 
                     ui.separator();
-                    let resolved_url =
-                        resolve_placeholders(&preview_url, &self.selected_environment_variables());
+                    let env_vars = self.selected_environment_variables();
+                    let resolved_url = resolve_endpoint_url(&self.endpoints[index], &env_vars);
                     ui.label(format!("Resolved URL (preview): {resolved_url}"));
                     if ui.button("Copy cURL for Selected Request").clicked() {
                         self.copy_curl_for_selected_request(ctx);
                     }
-                    ui.label("Use ${variable_name} placeholders in URL, headers, and body.");
+                    ui.label(
+                        "Use ${variable_name} placeholders in URL, params, headers, and body.",
+                    );
                 });
         });
     }

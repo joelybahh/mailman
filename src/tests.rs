@@ -5,10 +5,10 @@ use reqwest::Method;
 use crate::app_support::{
     ImportScanResult, PostmanField, WorkspaceImportContext, build_curl_command, decrypt_bytes,
     deserialize_workspace_bundle, encrypt_bytes, endpoint_from_cache_object, execute_request,
-    extract_import_entities_from_leveldb_binary, normalize_postman_placeholders,
-    render_postman_formdata_fields, request_body_from_data, request_body_mode_from_data,
-    request_headers_from_data, request_url_from_data, resolve_placeholders,
-    serialize_workspace_bundle,
+    extract_import_entities_from_leveldb_binary, normalize_endpoint_url_and_query_params,
+    normalize_postman_placeholders, render_postman_formdata_fields, request_body_from_data,
+    request_body_mode_from_data, request_headers_from_data, request_url_from_data,
+    resolve_endpoint_url, resolve_placeholders, serialize_workspace_bundle,
 };
 use crate::models::{Endpoint, KeyValue, SharedEnvironment, SharedWorkspacePayload};
 use crate::request_body::{
@@ -24,6 +24,72 @@ fn placeholder_substitution_works() {
 
     let output = resolve_placeholders("https://${api_host}/x?token=${token}", &vars);
     assert_eq!(output, "https://localhost:8080/x?token=abc123");
+}
+
+#[test]
+fn normalize_endpoint_url_and_query_params_splits_existing_url_query() {
+    let mut endpoint = Endpoint {
+        id: "ep-query".to_owned(),
+        source_request_id: String::new(),
+        source_collection_id: String::new(),
+        source_folder_id: String::new(),
+        name: "Query".to_owned(),
+        collection: "General".to_owned(),
+        folder_path: String::new(),
+        method: "GET".to_owned(),
+        url: "https://api.example.com/items?limit=25&token=${token}".to_owned(),
+        query_params: vec![],
+        headers: vec![],
+        body_mode: "none".to_owned(),
+        body: String::new(),
+    };
+
+    normalize_endpoint_url_and_query_params(&mut endpoint);
+
+    assert_eq!(endpoint.url, "https://api.example.com/items");
+    assert_eq!(endpoint.query_params.len(), 2);
+    assert_eq!(endpoint.query_params[0].key, "limit");
+    assert_eq!(endpoint.query_params[0].value, "25");
+    assert_eq!(endpoint.query_params[1].key, "token");
+    assert_eq!(endpoint.query_params[1].value, "${token}");
+}
+
+#[test]
+fn resolve_endpoint_url_appends_params_with_placeholders() {
+    let endpoint = Endpoint {
+        id: "ep-query-resolve".to_owned(),
+        source_request_id: String::new(),
+        source_collection_id: String::new(),
+        source_folder_id: String::new(),
+        name: "Query".to_owned(),
+        collection: "General".to_owned(),
+        folder_path: String::new(),
+        method: "GET".to_owned(),
+        url: "https://${api_host}/items".to_owned(),
+        query_params: vec![
+            KeyValue {
+                key: "limit".to_owned(),
+                value: "10".to_owned(),
+            },
+            KeyValue {
+                key: "token".to_owned(),
+                value: "${token}".to_owned(),
+            },
+        ],
+        headers: vec![],
+        body_mode: "none".to_owned(),
+        body: String::new(),
+    };
+
+    let mut env = BTreeMap::new();
+    env.insert("api_host".to_owned(), "api.example.com".to_owned());
+    env.insert("token".to_owned(), "abc".to_owned());
+
+    let resolved_url = resolve_endpoint_url(&endpoint, &env);
+    assert_eq!(
+        resolved_url,
+        "https://api.example.com/items?limit=10&token=abc"
+    );
 }
 
 #[test]
@@ -155,6 +221,7 @@ fn build_curl_command_resolves_env_and_quotes_values() {
         folder_path: String::new(),
         method: "post".to_owned(),
         url: "https://${api_host}/v1/resource?x=${x}".to_owned(),
+        query_params: vec![],
         headers: vec![
             KeyValue {
                 key: "Authorization".to_owned(),
@@ -196,6 +263,7 @@ fn execute_request_rejects_invalid_header_name_with_clear_error() {
         folder_path: String::new(),
         method: "GET".to_owned(),
         url: "https://example.com".to_owned(),
+        query_params: vec![],
         headers: vec![KeyValue {
             key: "Bad Header".to_owned(),
             value: "Bearer abc".to_owned(),
@@ -361,6 +429,7 @@ fn build_curl_command_uses_form_flag_for_form_data_mode() {
         folder_path: String::new(),
         method: "POST".to_owned(),
         url: "https://example.com/upload".to_owned(),
+        query_params: vec![],
         headers: vec![],
         body_mode: "form-data".to_owned(),
         body: "name=joel\nfile=@/tmp/payload.bin".to_owned(),
@@ -455,6 +524,7 @@ fn workspace_bundle_roundtrip_preserves_requests_and_environments() {
             folder_path: String::new(),
             method: "GET".to_owned(),
             url: "https://example.com/health".to_owned(),
+            query_params: vec![],
             headers: vec![],
             body_mode: "none".to_owned(),
             body: String::new(),

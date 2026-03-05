@@ -195,6 +195,7 @@ pub(crate) fn default_endpoints() -> Vec<Endpoint> {
             folder_path: String::new(),
             method: "POST".to_owned(),
             url: "https://${api_host}/api/v1/login".to_owned(),
+            query_params: vec![],
             headers: vec![KeyValue {
                 key: "Content-Type".to_owned(),
                 value: "application/json".to_owned(),
@@ -304,9 +305,7 @@ pub(crate) fn execute_request(
         }
     };
 
-    let resolved_url = resolve_placeholders(&endpoint.url, &env_vars)
-        .trim()
-        .to_owned();
+    let resolved_url = resolve_endpoint_url(&endpoint, &env_vars).trim().to_owned();
     if resolved_url.is_empty() {
         output.error = Some("Request URL is empty after placeholder resolution.".to_owned());
         return output;
@@ -533,7 +532,7 @@ pub(crate) fn build_curl_command(
     env_vars: &BTreeMap<String, String>,
 ) -> String {
     let resolved_method = endpoint.method.trim().to_uppercase();
-    let resolved_url = resolve_placeholders(&endpoint.url, env_vars);
+    let resolved_url = resolve_endpoint_url(endpoint, env_vars);
     let resolved_body = resolve_placeholders(&endpoint.body, env_vars);
     let body_mode = normalize_body_mode(&endpoint.body_mode);
     let has_content_type_header = endpoint
@@ -641,6 +640,52 @@ pub(crate) fn resolve_placeholders(template: &str, env_vars: &BTreeMap<String, S
         .to_string()
 }
 
+pub(crate) fn resolve_endpoint_url(
+    endpoint: &Endpoint,
+    env_vars: &BTreeMap<String, String>,
+) -> String {
+    let base_url = resolve_placeholders(&endpoint.url, env_vars)
+        .trim()
+        .to_owned();
+    if endpoint.query_params.is_empty() {
+        return base_url;
+    }
+
+    let mut pairs = vec![];
+    for param in &endpoint.query_params {
+        let key = resolve_placeholders(&param.key, env_vars).trim().to_owned();
+        if key.is_empty() {
+            continue;
+        }
+        let value = resolve_placeholders(&param.value, env_vars)
+            .trim()
+            .to_owned();
+        if value.is_empty() {
+            pairs.push(key);
+        } else {
+            pairs.push(format!("{key}={value}"));
+        }
+    }
+
+    append_query_pairs_to_url(base_url, &pairs)
+}
+
+pub(crate) fn normalize_endpoint_url_and_query_params(endpoint: &mut Endpoint) {
+    endpoint
+        .query_params
+        .retain(|param| !param.key.trim().is_empty() || !param.value.trim().is_empty());
+    if !endpoint.query_params.is_empty() {
+        return;
+    }
+
+    let (base_url, query_params) = split_url_and_query_params(&endpoint.url);
+    if query_params.is_empty() {
+        return;
+    }
+    endpoint.url = base_url;
+    endpoint.query_params = query_params;
+}
+
 pub(crate) fn normalize_postman_placeholders(input: &str) -> String {
     POSTMAN_PLACEHOLDER_PATTERN
         .replace_all(input, |captures: &regex::Captures<'_>| {
@@ -658,13 +703,31 @@ pub(crate) fn endpoint_dedup_key(endpoint: &Endpoint) -> String {
         return format!("source-id|{}", source_id.to_ascii_lowercase());
     }
 
+    let query_signature = endpoint
+        .query_params
+        .iter()
+        .filter_map(|param| {
+            let key = param.key.trim().to_ascii_lowercase();
+            if key.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "{}={}",
+                key,
+                param.value.trim().to_ascii_lowercase()
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}",
         endpoint.method.trim().to_uppercase(),
         endpoint.url.trim().to_lowercase(),
         endpoint.collection.trim().to_lowercase(),
         endpoint.folder_path.trim().to_lowercase(),
-        endpoint.name.trim().to_lowercase()
+        endpoint.name.trim().to_lowercase(),
+        query_signature
     )
 }
 
@@ -721,6 +784,11 @@ pub(crate) fn merge_endpoint_details(existing: &mut Endpoint, incoming: Endpoint
         }
     }
 
+    if existing.query_params.is_empty() && !incoming.query_params.is_empty() {
+        existing.query_params = incoming.query_params;
+        changed = true;
+    }
+
     if existing.body.trim().is_empty() && !incoming.body.trim().is_empty() {
         existing.body = incoming.body;
         changed = true;
@@ -745,6 +813,70 @@ pub(crate) fn merge_endpoint_details(existing: &mut Endpoint, incoming: Endpoint
     }
 
     changed
+}
+
+fn split_url_and_query_params(url: &str) -> (String, Vec<KeyValue>) {
+    let Some(query_start) = url.find('?') else {
+        return (url.to_owned(), vec![]);
+    };
+
+    let mut base = url[..query_start].to_owned();
+    let mut query_and_fragment = url[query_start + 1..].to_owned();
+    let mut fragment = String::new();
+    if let Some(hash_index) = query_and_fragment.find('#') {
+        fragment = query_and_fragment[hash_index..].to_owned();
+        query_and_fragment.truncate(hash_index);
+    }
+
+    let mut query_params = vec![];
+    for item in query_and_fragment.split('&') {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let (key, value) = if let Some(eq_index) = trimmed.find('=') {
+            (&trimmed[..eq_index], &trimmed[eq_index + 1..])
+        } else {
+            (trimmed, "")
+        };
+
+        query_params.push(KeyValue {
+            key: key.trim().to_owned(),
+            value: value.trim().to_owned(),
+        });
+    }
+
+    if !fragment.is_empty() {
+        base.push_str(&fragment);
+    }
+
+    (base, query_params)
+}
+
+fn append_query_pairs_to_url(mut url: String, query_pairs: &[String]) -> String {
+    if query_pairs.is_empty() {
+        return url;
+    }
+
+    let mut fragment = String::new();
+    if let Some(hash_index) = url.find('#') {
+        fragment = url[hash_index..].to_owned();
+        url.truncate(hash_index);
+    }
+
+    if !url.contains('?') {
+        url.push('?');
+    } else if !url.ends_with('?') && !url.ends_with('&') {
+        url.push('&');
+    }
+    url.push_str(&query_pairs.join("&"));
+
+    if !fragment.is_empty() {
+        url.push_str(&fragment);
+    }
+
+    url
 }
 
 pub(crate) fn read_json_or_default<T>(path: &Path) -> io::Result<Option<T>>
@@ -1757,6 +1889,7 @@ fn endpoint_from_requester_log_object(
         folder_path,
         method,
         url: normalize_postman_placeholders(&url),
+        query_params: vec![],
         headers: request_headers_from_data(object),
         body_mode: request_body_mode_from_data(object),
         body: request_body_from_data(object),
@@ -2025,6 +2158,7 @@ pub(crate) fn endpoint_from_cache_object(
         folder_path: request_folder_path_from_data(data),
         method,
         url: normalize_postman_placeholders(&url),
+        query_params: vec![],
         headers: request_headers_from_data(data),
         body_mode: request_body_mode_from_data(data),
         body: request_body_from_data(data),
@@ -3338,6 +3472,7 @@ fn endpoint_from_postman_request(
         folder_path: folder_path.to_owned(),
         method,
         url: normalize_postman_placeholders(&raw_url),
+        query_params: vec![],
         headers,
         body_mode,
         body,

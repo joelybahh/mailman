@@ -70,6 +70,8 @@ pub(crate) struct Endpoint {
     pub(crate) folder_path: String,
     pub(crate) method: String,
     pub(crate) url: String,
+    #[serde(default)]
+    pub(crate) query_params: Vec<KeyValue>,
     pub(crate) headers: Vec<KeyValue>,
     #[serde(default = "default_endpoint_body_mode")]
     pub(crate) body_mode: String,
@@ -88,6 +90,7 @@ impl Endpoint {
             folder_path: String::new(),
             method: method.to_owned(),
             url: url.to_owned(),
+            query_params: vec![],
             headers: vec![],
             body_mode: "none".to_owned(),
             body: String::new(),

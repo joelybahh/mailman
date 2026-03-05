@@ -7,8 +7,9 @@ use walkdir::WalkDir;
 
 use crate::app_support::{
     decrypt_bytes, default_endpoints, default_environment_index, default_environments,
-    default_variables_for_environment_name, encrypt_bytes, normalize_folder_path,
-    read_json_or_default, safe_path_segment, split_folder_path, write_json_pretty,
+    default_variables_for_environment_name, encrypt_bytes, normalize_endpoint_url_and_query_params,
+    normalize_folder_path, read_json_or_default, safe_path_segment, split_folder_path,
+    write_json_pretty,
 };
 use crate::models::{
     AppConfig, EncryptedBlob, Endpoint, Environment, EnvironmentFile, EnvironmentIndexEntry,
@@ -78,6 +79,7 @@ impl AppStorage {
                 endpoint.collection = "General".to_owned();
             }
             endpoint.folder_path = normalize_folder_path(&endpoint.folder_path);
+            normalize_endpoint_url_and_query_params(endpoint);
         }
 
         let mut config: AppConfig =
