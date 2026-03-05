@@ -106,6 +106,11 @@ impl AppStorage {
         })
     }
 
+    pub(crate) fn load_config(&self) -> io::Result<AppConfig> {
+        self.ensure_directories()?;
+        Ok(read_json_or_default::<AppConfig>(&self.config_path)?.unwrap_or_default())
+    }
+
     pub(crate) fn load_security_metadata(&self) -> io::Result<Option<SecurityMetadata>> {
         self.ensure_directories()?;
         read_json_or_default::<SecurityMetadata>(&self.security_path)
@@ -223,6 +228,11 @@ impl AppStorage {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn save_config(&self, config: &AppConfig) -> io::Result<()> {
+        self.ensure_directories()?;
+        write_json_pretty(&self.config_path, config)
     }
 
     fn load_endpoints_tree(&self) -> io::Result<Vec<Endpoint>> {

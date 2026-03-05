@@ -155,6 +155,25 @@ impl MailmanApp {
         self.last_mutation = Instant::now();
     }
 
+    fn sync_window_resolution(&mut self, ctx: &egui::Context) {
+        let Some(inner_rect) = ctx.input(|input| input.viewport().inner_rect) else {
+            return;
+        };
+
+        let width = inner_rect.width().max(1.0).round() as u32;
+        let height = inner_rect.height().max(1.0).round() as u32;
+        if self.config.window_width == Some(width) && self.config.window_height == Some(height) {
+            return;
+        }
+
+        self.config.window_width = Some(width);
+        self.config.window_height = Some(height);
+
+        if self.phase == AppPhase::Ready {
+            self.mark_dirty();
+        }
+    }
+
     fn ensure_selected_ids(&mut self) {
         if self
             .selected_endpoint_id
@@ -1616,6 +1635,7 @@ impl MailmanApp {
 
 impl eframe::App for MailmanApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_window_resolution(ctx);
         ctx.set_visuals(egui::Visuals::dark());
 
         if self.phase != AppPhase::Ready {
@@ -1639,5 +1659,11 @@ impl eframe::App for MailmanApp {
 
         self.try_auto_save();
         ctx.request_repaint_after(Duration::from_millis(16));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Err(err) = self.storage.save_config(&self.config) {
+            eprintln!("Failed to persist app config on exit: {err}");
+        }
     }
 }

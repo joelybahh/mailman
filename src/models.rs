@@ -127,6 +127,10 @@ pub(crate) struct AppConfig {
     pub(crate) selected_endpoint_id: Option<String>,
     pub(crate) selected_environment_id: Option<String>,
     pub(crate) postman_preseed_done: bool,
+    #[serde(default)]
+    pub(crate) window_width: Option<u32>,
+    #[serde(default)]
+    pub(crate) window_height: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
