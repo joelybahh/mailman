@@ -845,25 +845,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
-name = "delivery-man"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "base64",
- "chacha20poly1305",
- "directories",
- "eframe",
- "flate2",
- "rand 0.8.5",
- "regex",
- "reqwest",
- "rusty-leveldb",
- "serde",
- "serde_json",
- "walkdir",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2049,6 +2030,25 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "mailman"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "base64",
+ "chacha20poly1305",
+ "directories",
+ "eframe",
+ "flate2",
+ "rand 0.8.5",
+ "regex",
+ "reqwest",
+ "rusty-leveldb",
+ "serde",
+ "serde_json",
+ "walkdir",
+]
 
 [[package]]
 name = "malloc_buf"
