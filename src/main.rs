@@ -1,37 +1,39 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::LazyLock;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use directories::{BaseDirs, ProjectDirs};
 use eframe::egui::{self, Color32, RichText, TextEdit};
+use flate2::Compression;
 use flate2::read::GzDecoder;
-use rand::rngs::OsRng;
+use flate2::write::GzEncoder;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use regex::Regex;
+use reqwest::Method;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
-use reqwest::Method;
-use rusty_leveldb::{LdbIterator, Options as LevelDbOptions, DB as LevelDb};
+use rusty_leveldb::{DB as LevelDb, LdbIterator, Options as LevelDbOptions};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 mod request_body;
 use request_body::{
-    build_prepared_request_body, computed_default_content_length, default_content_type_for_mode,
-    normalize_body_mode, normalize_body_mode_owned, parse_body_fields,
-    should_add_default_content_type, PreparedRequestBody,
+    PreparedRequestBody, build_prepared_request_body, computed_default_content_length,
+    default_content_type_for_mode, normalize_body_mode, normalize_body_mode_owned,
+    parse_body_fields, should_add_default_content_type,
 };
 
 fn main() -> eframe::Result<()> {
@@ -173,6 +175,26 @@ struct SecurityMetadata {
     version: u8,
     salt_b64: String,
     verifier: EncryptedBlob,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SharedWorkspaceBundleFile {
+    version: u8,
+    salt_b64: String,
+    encrypted: EncryptedBlob,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SharedWorkspacePayload {
+    version: u8,
+    endpoints: Vec<Endpoint>,
+    environments: Vec<SharedEnvironment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SharedEnvironment {
+    name: String,
+    variables: Vec<KeyValue>,
 }
 
 #[derive(Default, Debug)]
@@ -525,6 +547,12 @@ struct PostmanCloneApp {
     postman_workspace_filter: String,
     show_environment_panel: bool,
     confirm_delete_all_requests: bool,
+    show_export_bundle_dialog: bool,
+    export_bundle_password: String,
+    export_bundle_password_confirm: String,
+    show_import_bundle_dialog: bool,
+    import_bundle_path: Option<PathBuf>,
+    import_bundle_password: String,
 }
 
 impl PostmanCloneApp {
@@ -586,6 +614,12 @@ impl PostmanCloneApp {
             postman_workspace_filter: String::new(),
             show_environment_panel: true,
             confirm_delete_all_requests: false,
+            show_export_bundle_dialog: false,
+            export_bundle_password: String::new(),
+            export_bundle_password_confirm: String::new(),
+            show_import_bundle_dialog: false,
+            import_bundle_path: None,
+            import_bundle_password: String::new(),
         }
     }
 
@@ -1078,6 +1112,222 @@ impl PostmanCloneApp {
         summary
     }
 
+    fn export_workspace_bundle_to_path(
+        &self,
+        path: &Path,
+        password: &str,
+    ) -> Result<(usize, usize), String> {
+        let payload = SharedWorkspacePayload {
+            version: 1,
+            endpoints: self.endpoints.clone(),
+            environments: self
+                .environments
+                .iter()
+                .map(|env| SharedEnvironment {
+                    name: env.name.clone(),
+                    variables: env.variables.clone(),
+                })
+                .collect(),
+        };
+
+        let encoded = serialize_workspace_bundle(&payload, password)?;
+        fs::write(path, encoded).map_err(|err| format!("Failed to write bundle: {err}"))?;
+
+        Ok((payload.endpoints.len(), payload.environments.len()))
+    }
+
+    fn import_workspace_bundle_from_path(
+        &mut self,
+        path: &Path,
+        password: &str,
+    ) -> Result<ImportSummary, String> {
+        let raw =
+            fs::read_to_string(path).map_err(|err| format!("Failed to read bundle: {err}"))?;
+        let payload = deserialize_workspace_bundle(&raw, password)?;
+
+        if payload.endpoints.is_empty() && payload.environments.is_empty() {
+            return Err("Bundle contains no endpoints or environments.".to_owned());
+        }
+
+        let mut seen_ids = self
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let mut scan_result = ImportScanResult::default();
+        scan_result.endpoints = payload
+            .endpoints
+            .into_iter()
+            .map(|mut endpoint| {
+                endpoint.collection = if endpoint.collection.trim().is_empty() {
+                    "General".to_owned()
+                } else {
+                    endpoint.collection.trim().to_owned()
+                };
+                endpoint.folder_path = normalize_folder_path(&endpoint.folder_path);
+                endpoint.body_mode = normalize_body_mode_owned(&endpoint.body_mode);
+                if endpoint.body_mode == "raw" && endpoint.body.is_empty() {
+                    endpoint.body_mode = "none".to_owned();
+                }
+
+                if endpoint.id.trim().is_empty() || seen_ids.contains(endpoint.id.trim()) {
+                    endpoint.id = create_id("ep");
+                }
+                seen_ids.insert(endpoint.id.clone());
+
+                endpoint
+            })
+            .collect();
+        scan_result.environments = payload
+            .environments
+            .into_iter()
+            .map(|environment| ImportedEnvironment {
+                name: environment.name,
+                variables: environment.variables,
+            })
+            .collect();
+
+        Ok(self.merge_postman_import(scan_result))
+    }
+
+    fn render_share_bundle_dialogs(&mut self, ctx: &egui::Context) {
+        if self.show_export_bundle_dialog {
+            let mut open = self.show_export_bundle_dialog;
+            let mut should_close = false;
+
+            egui::Window::new("Export Workspace Bundle")
+                .open(&mut open)
+                .resizable(false)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label("Create a password-protected bundle that can be imported on any OS.");
+                    ui.add(
+                        TextEdit::singleline(&mut self.export_bundle_password)
+                            .password(true)
+                            .hint_text("Bundle password"),
+                    );
+                    ui.add(
+                        TextEdit::singleline(&mut self.export_bundle_password_confirm)
+                            .password(true)
+                            .hint_text("Confirm bundle password"),
+                    );
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Export").clicked() {
+                            let password = self.export_bundle_password.trim().to_owned();
+                            let confirm = self.export_bundle_password_confirm.trim().to_owned();
+
+                            if password.len() < 8 {
+                                self.status_line =
+                                    "Bundle password must be at least 8 characters.".to_owned();
+                                return;
+                            }
+                            if password != confirm {
+                                self.status_line =
+                                    "Bundle password confirmation does not match.".to_owned();
+                                return;
+                            }
+
+                            let save_target = rfd::FileDialog::new()
+                                .set_title("Export Mail Man Bundle")
+                                .set_file_name("mailman-workspace.mmbundle")
+                                .add_filter("Mail Man Bundle", &["mmbundle", "mailmanbundle"])
+                                .save_file();
+
+                            let Some(path) = save_target else {
+                                self.status_line = "Bundle export canceled.".to_owned();
+                                return;
+                            };
+
+                            match self.export_workspace_bundle_to_path(&path, &password) {
+                                Ok((endpoint_count, environment_count)) => {
+                                    self.status_line = format!(
+                                        "Bundle exported: {} endpoints and {} environments to {}",
+                                        endpoint_count,
+                                        environment_count,
+                                        path.display()
+                                    );
+                                    should_close = true;
+                                }
+                                Err(err) => {
+                                    self.status_line = format!("Bundle export failed: {err}");
+                                }
+                            }
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+
+            self.show_export_bundle_dialog = open && !should_close;
+        }
+
+        if self.show_import_bundle_dialog {
+            let mut open = self.show_import_bundle_dialog;
+            let mut should_close = false;
+            let selected_path = self.import_bundle_path.clone();
+
+            egui::Window::new("Import Workspace Bundle")
+                .open(&mut open)
+                .resizable(false)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    if let Some(path) = selected_path.as_ref() {
+                        ui.label(format!("File: {}", path.display()));
+                    } else {
+                        ui.colored_label(Color32::from_rgb(240, 120, 120), "No bundle file selected.");
+                    }
+
+                    ui.add(
+                        TextEdit::singleline(&mut self.import_bundle_password)
+                            .password(true)
+                            .hint_text("Bundle password"),
+                    );
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Import").clicked() {
+                            let Some(path) = selected_path.as_ref() else {
+                                self.status_line = "Select a bundle file first.".to_owned();
+                                return;
+                            };
+
+                            let password = self.import_bundle_password.trim().to_owned();
+                            match self.import_workspace_bundle_from_path(path, &password) {
+                                Ok(summary) => {
+                                    self.status_line = format!(
+                                        "Bundle import: added {} endpoints, updated {} endpoints, added {} environments, merged {} environment vars.",
+                                        summary.endpoints_added,
+                                        summary.endpoints_updated,
+                                        summary.environments_added,
+                                        summary.environment_variables_merged,
+                                    );
+                                    self.last_mutation = Instant::now() - Duration::from_secs(1);
+                                    self.try_auto_save();
+                                    should_close = true;
+                                }
+                                Err(err) => {
+                                    self.status_line = format!("Bundle import failed: {err}");
+                                }
+                            }
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+
+            self.show_import_bundle_dialog = open && !should_close;
+            if should_close {
+                self.import_bundle_path = None;
+                self.import_bundle_password.clear();
+            }
+        }
+    }
+
     fn render_auth_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -1228,6 +1478,24 @@ impl PostmanCloneApp {
                         non_empty_trimmed(&self.postman_workspace_filter).map(str::to_owned);
                     let summary = self.import_postman_from_path(&path, workspace_filter.as_deref());
                     self.status_line = summary.to_message();
+                }
+
+                if ui.button("Export Bundle").clicked() {
+                    self.show_export_bundle_dialog = true;
+                    self.export_bundle_password.clear();
+                    self.export_bundle_password_confirm.clear();
+                }
+
+                if ui.button("Import Bundle").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Import Mail Man Bundle")
+                        .add_filter("Mail Man Bundle", &["mmbundle", "mailmanbundle", "json"])
+                        .pick_file()
+                    {
+                        self.import_bundle_path = Some(path);
+                        self.import_bundle_password.clear();
+                        self.show_import_bundle_dialog = true;
+                    }
                 }
 
                 if !self.confirm_delete_all_requests {
@@ -1675,6 +1943,7 @@ impl eframe::App for PostmanCloneApp {
         }
         self.render_request_editor(ctx);
         self.render_response_panel(ctx);
+        self.render_share_bundle_dialogs(ctx);
         self.render_status_line(ctx);
 
         self.try_auto_save();
@@ -2499,6 +2768,75 @@ fn decrypt_bytes(key: &KeyMaterial, blob: &EncryptedBlob) -> Result<Vec<u8>, Str
     cipher
         .decrypt(XNonce::from_slice(&nonce), ciphertext.as_slice())
         .map_err(|err| format!("decryption failed: {err}"))
+}
+
+fn serialize_workspace_bundle(
+    payload: &SharedWorkspacePayload,
+    password: &str,
+) -> Result<String, String> {
+    if password.trim().is_empty() {
+        return Err("Bundle password is required.".to_owned());
+    }
+
+    let payload_bytes = serde_json::to_vec(payload)
+        .map_err(|err| format!("Failed to encode payload JSON: {err}"))?;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(&payload_bytes)
+        .map_err(|err| format!("Failed to gzip payload: {err}"))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|err| format!("Failed to finalize gzip payload: {err}"))?;
+
+    let mut salt = [0_u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    let key = derive_key(password, &salt)?;
+    let encrypted = encrypt_bytes(&key, &compressed)?;
+
+    let bundle = SharedWorkspaceBundleFile {
+        version: 1,
+        salt_b64: BASE64.encode(salt),
+        encrypted,
+    };
+
+    serde_json::to_string_pretty(&bundle)
+        .map_err(|err| format!("Failed to encode bundle JSON: {err}"))
+}
+
+fn deserialize_workspace_bundle(
+    raw: &str,
+    password: &str,
+) -> Result<SharedWorkspacePayload, String> {
+    if password.trim().is_empty() {
+        return Err("Bundle password is required.".to_owned());
+    }
+
+    let bundle = serde_json::from_str::<SharedWorkspaceBundleFile>(raw)
+        .map_err(|err| format!("Invalid bundle file JSON: {err}"))?;
+    if bundle.version != 1 {
+        return Err(format!("Unsupported bundle version: {}", bundle.version));
+    }
+
+    let salt = BASE64
+        .decode(bundle.salt_b64.as_bytes())
+        .map_err(|err| format!("Invalid bundle salt: {err}"))?;
+    let key = derive_key(password, &salt)?;
+    let compressed = decrypt_bytes(&key, &bundle.encrypted)?;
+
+    let mut decoder = GzDecoder::new(compressed.as_slice());
+    let mut payload_bytes = Vec::new();
+    decoder
+        .read_to_end(&mut payload_bytes)
+        .map_err(|err| format!("Failed to decompress bundle payload: {err}"))?;
+
+    let payload = serde_json::from_slice::<SharedWorkspacePayload>(&payload_bytes)
+        .map_err(|err| format!("Invalid bundle payload JSON: {err}"))?;
+    if payload.version != 1 {
+        return Err(format!("Unsupported payload version: {}", payload.version));
+    }
+
+    Ok(payload)
 }
 
 fn scan_postman_directory(path: &Path, workspace_name_filter: Option<&str>) -> ImportScanResult {
@@ -4448,11 +4786,7 @@ fn workspace_id_from_model_path(path: &str) -> Option<&str> {
 
 fn non_empty_trimmed(input: &str) -> Option<&str> {
     let value = input.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn resolve_folder_path_from_lookup(

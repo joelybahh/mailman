@@ -1,4 +1,3 @@
-
 use super::*;
 
 #[test]
@@ -424,4 +423,62 @@ fn cache_request_without_collection_id_is_kept_when_filter_is_present() {
         .expect("endpoint should be parsed");
 
     assert_eq!(endpoint.name, "No Collection");
+}
+
+#[test]
+fn workspace_bundle_roundtrip_preserves_requests_and_environments() {
+    let payload = SharedWorkspacePayload {
+        version: 1,
+        endpoints: vec![Endpoint {
+            id: "ep-share".to_owned(),
+            source_request_id: String::new(),
+            source_collection_id: String::new(),
+            source_folder_id: String::new(),
+            name: "Health".to_owned(),
+            collection: "General".to_owned(),
+            folder_path: String::new(),
+            method: "GET".to_owned(),
+            url: "https://example.com/health".to_owned(),
+            headers: vec![],
+            body_mode: "none".to_owned(),
+            body: String::new(),
+        }],
+        environments: vec![SharedEnvironment {
+            name: "dev".to_owned(),
+            variables: vec![KeyValue {
+                key: "api_host".to_owned(),
+                value: "localhost:8080".to_owned(),
+            }],
+        }],
+    };
+
+    let encoded =
+        serialize_workspace_bundle(&payload, "super-secret").expect("bundle should encode");
+    let decoded =
+        deserialize_workspace_bundle(&encoded, "super-secret").expect("bundle should decode");
+
+    assert_eq!(decoded.endpoints.len(), 1);
+    assert_eq!(decoded.endpoints[0].url, "https://example.com/health");
+    assert_eq!(decoded.environments.len(), 1);
+    assert_eq!(decoded.environments[0].name, "dev");
+    assert_eq!(decoded.environments[0].variables[0].key, "api_host");
+}
+
+#[test]
+fn workspace_bundle_rejects_wrong_password() {
+    let payload = SharedWorkspacePayload {
+        version: 1,
+        endpoints: vec![],
+        environments: vec![],
+    };
+
+    let encoded =
+        serialize_workspace_bundle(&payload, "correct-horse").expect("bundle should encode");
+    let err = deserialize_workspace_bundle(&encoded, "wrong-password")
+        .expect_err("wrong password should fail");
+
+    assert!(
+        err.contains("decryption failed") || err.contains("password"),
+        "unexpected error: {err}"
+    );
 }
