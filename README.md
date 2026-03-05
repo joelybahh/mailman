@@ -59,6 +59,45 @@ cargo build --release
 ./target/release/mailman
 ```
 
+## Packaging Installers (Tauri Bundler Ecosystem)
+
+This repo is pre-configured for `cargo-packager` via `Cargo.toml` (`[package.metadata.packager]`)
+to produce:
+- macOS: `.app` and `.dmg`
+- Linux: `.deb`
+- Windows: `.msi` and `.exe` (NSIS)
+
+### 1. Install packager CLI
+
+```bash
+cargo install cargo-packager --locked
+```
+
+### 2. Add your app icons
+
+Place icons in `assets/icons/` with these filenames:
+- `32x32.png`
+- `128x128.png`
+- `128x128@2x.png`
+- `icon.icns`
+- `icon.ico`
+
+### 3. Build packages
+
+```bash
+make bundle-mac
+make bundle-linux
+make bundle-win
+```
+
+Or build every configured format:
+
+```bash
+make bundle-all
+```
+
+Artifacts are written to `dist/packager`.
+
 ## Security Model
 
 - On first launch, you set a master password.
