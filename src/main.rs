@@ -27,6 +27,13 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+mod request_body;
+use request_body::{
+    PreparedRequestBody, build_prepared_request_body, computed_default_content_length,
+    default_content_type_for_mode, normalize_body_mode, normalize_body_mode_owned,
+    parse_body_fields, should_add_default_content_type,
+};
+
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
@@ -69,6 +76,7 @@ const GZIP_MAGIC: &[u8] = b"\x1f\x8b\x08";
 const METHOD_OPTIONS: [&str; 9] = [
     "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT",
 ];
+const BODY_MODE_OPTIONS: [&str; 5] = ["none", "raw", "urlencoded", "form-data", "binary"];
 
 const VERIFIER_PLAINTEXT: &[u8] = b"delivery-man-unlock-verifier-v1";
 
@@ -97,6 +105,8 @@ struct Endpoint {
     method: String,
     url: String,
     headers: Vec<KeyValue>,
+    #[serde(default = "default_endpoint_body_mode")]
+    body_mode: String,
     body: String,
 }
 
@@ -113,9 +123,14 @@ impl Endpoint {
             method: method.to_owned(),
             url: url.to_owned(),
             headers: vec![],
+            body_mode: "none".to_owned(),
             body: String::new(),
         }
     }
+}
+
+fn default_endpoint_body_mode() -> String {
+    "raw".to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -411,12 +426,16 @@ impl AppStorage {
             }
 
             let raw = fs::read_to_string(entry.path())?;
-            let endpoint = serde_json::from_str::<Endpoint>(&raw).map_err(|err| {
+            let mut endpoint = serde_json::from_str::<Endpoint>(&raw).map_err(|err| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("invalid endpoint file {}: {err}", entry.path().display()),
                 )
             })?;
+            endpoint.body_mode = normalize_body_mode_owned(&endpoint.body_mode);
+            if endpoint.body_mode == "raw" && endpoint.body.is_empty() {
+                endpoint.body_mode = "none".to_owned();
+            }
             endpoints.push(endpoint);
         }
 
@@ -493,6 +512,7 @@ struct PostmanCloneApp {
     auth_message: String,
 
     response: ResponseState,
+    response_body_view: String,
     status_line: String,
     dirty: bool,
     last_mutation: Instant,
@@ -554,6 +574,7 @@ impl PostmanCloneApp {
             unlock_password: String::new(),
             auth_message: String::new(),
             response: ResponseState::default(),
+            response_body_view: String::new(),
             status_line,
             dirty: false,
             last_mutation: Instant::now(),
@@ -764,6 +785,7 @@ impl PostmanCloneApp {
             method: "GET".to_owned(),
             url: "https://${api_host}/v1/health".to_owned(),
             headers: vec![],
+            body_mode: "none".to_owned(),
             body: String::new(),
         });
         self.selected_endpoint_id = Some(id);
@@ -839,6 +861,7 @@ impl PostmanCloneApp {
 
         self.in_flight = true;
         self.response.clear_for_request();
+        self.response_body_view.clear();
         self.response_rx = Some(rx);
         self.status_line = format!("Sending {} {}", endpoint.method, endpoint.url);
 
@@ -869,6 +892,7 @@ impl PostmanCloneApp {
         match rx.try_recv() {
             Ok(response_state) => {
                 self.response = response_state;
+                self.response_body_view = self.response.body.clone();
                 self.in_flight = false;
                 self.response_rx = None;
             }
@@ -877,6 +901,7 @@ impl PostmanCloneApp {
                 self.in_flight = false;
                 self.response_rx = None;
                 self.response.error = Some("Request worker disconnected.".to_owned());
+                self.response_body_view.clear();
             }
         }
     }
@@ -1382,185 +1407,234 @@ impl PostmanCloneApp {
 
     fn render_request_editor(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Request Builder");
-            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.heading("Request Builder");
+                    ui.separator();
 
-            let Some(index) = self.selected_endpoint_index() else {
-                ui.label("Select a request from the left panel.");
-                return;
-            };
+                    let Some(index) = self.selected_endpoint_index() else {
+                        ui.label("Select a request from the left panel.");
+                        return;
+                    };
 
-            let mut changed = false;
-            let mut remove_header_index: Option<usize> = None;
-            let preview_url;
+                    let mut changed = false;
+                    let mut remove_header_index: Option<usize> = None;
+                    let preview_url;
 
-            {
-                let endpoint = &mut self.endpoints[index];
-
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    if ui.text_edit_singleline(&mut endpoint.name).changed() {
-                        changed = true;
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Collection");
-                    if ui
-                        .add(
-                            TextEdit::singleline(&mut endpoint.collection)
-                                .hint_text("Inspace API V3"),
-                        )
-                        .changed()
                     {
-                        changed = true;
-                    }
-                });
+                        let endpoint = &mut self.endpoints[index];
 
-                ui.horizontal(|ui| {
-                    ui.label("Folder");
-                    if ui
-                        .add(
-                            TextEdit::singleline(&mut endpoint.folder_path)
-                                .hint_text("Micro / Query / Native"),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("method-picker")
-                        .selected_text(&endpoint.method)
-                        .show_ui(ui, |ui| {
-                            for method in METHOD_OPTIONS {
-                                if ui
-                                    .selectable_label(endpoint.method == method, method)
-                                    .clicked()
-                                {
-                                    endpoint.method = method.to_owned();
-                                    changed = true;
-                                }
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            if ui
+                                .add(
+                                    TextEdit::singleline(&mut endpoint.name)
+                                        .desired_width(f32::INFINITY),
+                                )
+                                .changed()
+                            {
+                                changed = true;
                             }
                         });
 
-                    if ui
-                        .add(
-                            TextEdit::singleline(&mut endpoint.url)
-                                .hint_text("https://${api_host}/resource"),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                });
+                        ui.horizontal(|ui| {
+                            ui.label("Collection");
+                            if ui
+                                .add(
+                                    TextEdit::singleline(&mut endpoint.collection)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("Inspace API V3"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
 
-                ui.separator();
-                ui.label("Headers");
-                for (header_index, header) in endpoint.headers.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(TextEdit::singleline(&mut header.key).hint_text("Header"))
-                            .changed()
-                        {
+                        ui.horizontal(|ui| {
+                            ui.label("Folder");
+                            if ui
+                                .add(
+                                    TextEdit::singleline(&mut endpoint.folder_path)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("Micro / Query / Native"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("method-picker")
+                                .selected_text(&endpoint.method)
+                                .show_ui(ui, |ui| {
+                                    for method in METHOD_OPTIONS {
+                                        if ui
+                                            .selectable_label(endpoint.method == method, method)
+                                            .clicked()
+                                        {
+                                            endpoint.method = method.to_owned();
+                                            changed = true;
+                                        }
+                                    }
+                                });
+
+                            if ui
+                                .add(
+                                    TextEdit::singleline(&mut endpoint.url)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("https://${api_host}/resource"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+
+                        ui.separator();
+                        ui.label("Headers");
+                        for (header_index, header) in endpoint.headers.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        TextEdit::singleline(&mut header.key)
+                                            .desired_width(f32::INFINITY)
+                                            .hint_text("Header"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                if ui
+                                    .add(
+                                        TextEdit::singleline(&mut header.value)
+                                            .desired_width(f32::INFINITY)
+                                            .hint_text("Value"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                if ui.button("x").clicked() {
+                                    remove_header_index = Some(header_index);
+                                }
+                            });
+                        }
+
+                        if let Some(header_index) = remove_header_index {
+                            endpoint.headers.remove(header_index);
                             changed = true;
                         }
-                        if ui
-                            .add(TextEdit::singleline(&mut header.value).hint_text("Value"))
-                            .changed()
-                        {
+                        if ui.button("+ Add Header").clicked() {
+                            endpoint.headers.push(KeyValue::default());
                             changed = true;
                         }
-                        if ui.button("x").clicked() {
-                            remove_header_index = Some(header_index);
-                        }
-                    });
-                }
 
-                if let Some(header_index) = remove_header_index {
-                    endpoint.headers.remove(header_index);
-                    changed = true;
-                }
-                if ui.button("+ Add Header").clicked() {
-                    endpoint.headers.push(KeyValue::default());
-                    changed = true;
-                }
-
-                ui.separator();
-                ui.label("Body");
-                if ui
+                        ui.separator();
+                        ui.label("Body");
+                        ui.horizontal(|ui| {
+                            ui.label("Mode");
+                            egui::ComboBox::from_id_salt("body-mode-picker")
+                                .selected_text(normalize_body_mode(&endpoint.body_mode))
+                                .show_ui(ui, |ui| {
+                                    for mode in BODY_MODE_OPTIONS {
+                                        if ui
+                                            .selectable_label(
+                                                normalize_body_mode(&endpoint.body_mode) == mode,
+                                                mode,
+                                            )
+                                            .clicked()
+                                        {
+                                            endpoint.body_mode = mode.to_owned();
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                        });
+                        if ui
                     .add(
                         TextEdit::multiline(&mut endpoint.body)
+                            .desired_width(f32::INFINITY)
                             .desired_rows(12)
-                            .hint_text("{\n  \"token\": \"${token}\"\n}"),
+                            .hint_text(
+                                "{\n  \"token\": \"${token}\"\n}\nOR\nkey=value\nkey2=value2",
+                            ),
                     )
                     .changed()
                 {
                     changed = true;
                 }
 
-                preview_url = endpoint.url.clone();
-            }
+                        preview_url = endpoint.url.clone();
+                    }
 
-            if changed {
-                self.mark_dirty();
-            }
+                    if changed {
+                        self.mark_dirty();
+                    }
 
-            ui.separator();
-            let resolved_url =
-                resolve_placeholders(&preview_url, &self.selected_environment_variables());
-            ui.label(format!("Resolved URL (preview): {resolved_url}"));
-            if ui.button("Copy cURL for Selected Request").clicked() {
-                self.copy_curl_for_selected_request(ctx);
-            }
-            ui.label("Use ${variable_name} placeholders in URL, headers, and body.");
+                    ui.separator();
+                    let resolved_url =
+                        resolve_placeholders(&preview_url, &self.selected_environment_variables());
+                    ui.label(format!("Resolved URL (preview): {resolved_url}"));
+                    if ui.button("Copy cURL for Selected Request").clicked() {
+                        self.copy_curl_for_selected_request(ctx);
+                    }
+                    ui.label("Use ${variable_name} placeholders in URL, headers, and body.");
+                });
         });
     }
 
     fn render_response_panel(&mut self, ctx: &egui::Context) {
+        let max_response_height = (ctx.content_rect().height() * 0.60).max(180.0);
         egui::TopBottomPanel::bottom("response")
             .resizable(true)
             .default_height(260.0)
+            .min_height(140.0)
+            .max_height(max_response_height)
             .show(ctx, |ui| {
                 ui.heading("Response");
                 ui.separator();
-
-                if let Some(error) = &self.response.error {
-                    ui.colored_label(Color32::from_rgb(240, 120, 120), error);
-                }
-
-                if let Some(status_code) = self.response.status_code {
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "Status: {status_code} {}",
-                            self.response.status_text
-                        ));
-                        if let Some(duration) = self.response.duration_ms {
-                            ui.separator();
-                            ui.label(format!("Time: {duration} ms"));
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if let Some(error) = &self.response.error {
+                            ui.colored_label(Color32::from_rgb(240, 120, 120), error);
                         }
-                    });
-                } else if !self.response.status_text.is_empty() {
-                    ui.label(&self.response.status_text);
-                }
 
-                if !self.response.headers.is_empty() {
-                    ui.collapsing("Headers", |ui| {
-                        for header in &self.response.headers {
-                            ui.label(format!("{}: {}", header.key, header.value));
+                        if let Some(status_code) = self.response.status_code {
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "Status: {status_code} {}",
+                                    self.response.status_text
+                                ));
+                                if let Some(duration) = self.response.duration_ms {
+                                    ui.separator();
+                                    ui.label(format!("Time: {duration} ms"));
+                                }
+                            });
+                        } else if !self.response.status_text.is_empty() {
+                            ui.label(&self.response.status_text);
                         }
-                    });
-                }
 
-                ui.separator();
-                let mut response_body = self.response.body.clone();
-                ui.add(
-                    TextEdit::multiline(&mut response_body)
-                        .desired_rows(10)
-                        .code_editor()
-                        .interactive(false),
-                );
+                        if !self.response.headers.is_empty() {
+                            ui.collapsing("Headers", |ui| {
+                                for header in &self.response.headers {
+                                    ui.label(format!("{}: {}", header.key, header.value));
+                                }
+                            });
+                        }
+
+                        ui.separator();
+                        let body_height = ui.available_height().max(120.0);
+                        ui.add_sized(
+                            [ui.available_width(), body_height],
+                            TextEdit::multiline(&mut self.response_body_view)
+                                .desired_width(f32::INFINITY)
+                                .code_editor(),
+                        );
+                    });
             });
     }
 
@@ -1700,6 +1774,7 @@ struct PostmanBody {
     raw: Option<String>,
     urlencoded: Option<Vec<PostmanField>>,
     formdata: Option<Vec<PostmanField>>,
+    file: Option<serde_json::Value>,
     graphql: Option<PostmanGraphqlBody>,
 }
 
@@ -1724,6 +1799,9 @@ struct PostmanUrlObject {
 struct PostmanField {
     key: Option<String>,
     value: Option<serde_json::Value>,
+    #[serde(rename = "type")]
+    field_type: Option<String>,
+    src: Option<serde_json::Value>,
     disabled: Option<bool>,
     enabled: Option<bool>,
 }
@@ -1769,6 +1847,7 @@ fn default_endpoints() -> Vec<Endpoint> {
                 key: "Content-Type".to_owned(),
                 value: "application/json".to_owned(),
             }],
+            body_mode: "raw".to_owned(),
             body: "{\n  \"email\": \"${email}\",\n  \"password\": \"${password}\"\n}".to_owned(),
         },
     ]
@@ -1878,7 +1957,15 @@ fn execute_request(endpoint: Endpoint, env_vars: BTreeMap<String, String>) -> Re
         return output;
     }
     let resolved_body = resolve_placeholders(&endpoint.body, &env_vars);
-    let has_request_body = !resolved_body.trim().is_empty();
+    let body_mode = normalize_body_mode(&endpoint.body_mode);
+    let prepared_body = match build_prepared_request_body(body_mode, &resolved_body) {
+        Ok(prepared_body) => prepared_body,
+        Err(err) => {
+            output.error = Some(format!("Failed to prepare request body: {err}"));
+            return output;
+        }
+    };
+    let has_request_body = prepared_body.has_body();
 
     let client = match Client::builder()
         .timeout(Duration::from_secs(60))
@@ -1917,28 +2004,29 @@ fn execute_request(endpoint: Endpoint, env_vars: BTreeMap<String, String>) -> Re
     }
     if let Some(content_length) = computed_default_content_length(
         &method,
-        has_request_body,
         has_content_length_header,
-        &resolved_body,
+        prepared_body.known_content_length(),
+        has_request_body,
     ) {
         let content_length = match HeaderValue::from_str(&content_length) {
-                Ok(content_length) => content_length,
-                Err(err) => {
-                    output.error = Some(format!("Invalid computed content-length: {err}"));
-                    return output;
-                }
+            Ok(content_length) => content_length,
+            Err(err) => {
+                output.error = Some(format!("Invalid computed content-length: {err}"));
+                return output;
+            }
         };
-        request_builder = request_builder.header(
-            HeaderName::from_static("content-length"),
-            content_length,
-        );
+        request_builder =
+            request_builder.header(HeaderName::from_static("content-length"), content_length);
     }
     if should_add_default_content_type(has_request_body, has_content_type_header) {
-        let inferred_content_type = infer_default_content_type(&resolved_body);
-        request_builder = request_builder.header(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static(inferred_content_type),
-        );
+        if let Some(inferred_content_type) =
+            default_content_type_for_mode(body_mode, &resolved_body)
+        {
+            request_builder = request_builder.header(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static(inferred_content_type),
+            );
+        }
     }
 
     for header in endpoint.headers {
@@ -1973,8 +2061,17 @@ fn execute_request(endpoint: Endpoint, env_vars: BTreeMap<String, String>) -> Re
         request_builder = request_builder.header(header_name, header_value);
     }
 
-    if has_request_body {
-        request_builder = request_builder.body(resolved_body);
+    match prepared_body {
+        PreparedRequestBody::None => {}
+        PreparedRequestBody::Text(body) => {
+            request_builder = request_builder.body(body);
+        }
+        PreparedRequestBody::Binary(body) => {
+            request_builder = request_builder.body(body);
+        }
+        PreparedRequestBody::Multipart(form) => {
+            request_builder = request_builder.multipart(form);
+        }
     }
 
     let started = Instant::now();
@@ -2009,54 +2106,98 @@ fn execute_request(endpoint: Endpoint, env_vars: BTreeMap<String, String>) -> Re
     output
 }
 
-fn should_set_zero_content_length(method: &Method) -> bool {
-    matches!(*method, Method::POST | Method::PUT | Method::PATCH)
+fn request_body_mode_from_data(data: &serde_json::Map<String, serde_json::Value>) -> String {
+    if let Some(body_mode) = data
+        .get("dataMode")
+        .and_then(serde_json::Value::as_str)
+        .map(normalize_body_mode_owned)
+    {
+        return body_mode;
+    }
+
+    if let Some(body) = data.get("body").and_then(serde_json::Value::as_object) {
+        if let Some(mode) = body
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .map(normalize_body_mode_owned)
+        {
+            return mode;
+        }
+        if body.get("urlencoded").is_some_and(|value| !value.is_null()) {
+            return "urlencoded".to_owned();
+        }
+        if body.get("formdata").is_some_and(|value| !value.is_null()) {
+            return "form-data".to_owned();
+        }
+        if body.get("file").is_some_and(|value| !value.is_null()) {
+            return "binary".to_owned();
+        }
+        if body.get("raw").is_some_and(|value| !value.is_null()) {
+            return "raw".to_owned();
+        }
+    }
+
+    if data
+        .get("rawModeData")
+        .is_some_and(|value| !value.is_null())
+    {
+        return "raw".to_owned();
+    }
+
+    "none".to_owned()
 }
 
-fn computed_default_content_length(
-    method: &Method,
-    has_request_body: bool,
-    has_content_length_header: bool,
-    resolved_body: &str,
-) -> Option<String> {
-    if has_content_length_header {
-        return None;
-    }
-    if has_request_body {
-        return Some(resolved_body.len().to_string());
-    }
-    if should_set_zero_content_length(method) {
-        return Some("0".to_owned());
-    }
-    None
-}
+fn postman_request_body_mode(request: &PostmanRequest) -> String {
+    let Some(body) = request.body.as_ref() else {
+        return "none".to_owned();
+    };
 
-fn should_add_default_content_type(
-    has_request_body: bool,
-    has_content_type_header: bool,
-) -> bool {
-    has_request_body && !has_content_type_header
-}
-
-fn infer_default_content_type(body: &str) -> &'static str {
-    let trimmed = body.trim_start();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        "application/json"
-    } else {
-        "application/x-www-form-urlencoded"
+    if let Some(mode) = body.mode.as_deref() {
+        return normalize_body_mode_owned(mode);
     }
+
+    if body.urlencoded.is_some() {
+        return "urlencoded".to_owned();
+    }
+    if body.formdata.is_some() {
+        return "form-data".to_owned();
+    }
+    if body.file.is_some() {
+        return "binary".to_owned();
+    }
+    if body.raw.is_some() || body.graphql.is_some() {
+        return "raw".to_owned();
+    }
+    "none".to_owned()
 }
 
 fn build_curl_command(endpoint: &Endpoint, env_vars: &BTreeMap<String, String>) -> String {
     let resolved_method = endpoint.method.trim().to_uppercase();
     let resolved_url = resolve_placeholders(&endpoint.url, env_vars);
     let resolved_body = resolve_placeholders(&endpoint.body, env_vars);
+    let body_mode = normalize_body_mode(&endpoint.body_mode);
+    let has_content_type_header = endpoint
+        .headers
+        .iter()
+        .any(|header| header.key.trim().eq_ignore_ascii_case("content-type"));
+    let has_request_body = build_prepared_request_body(body_mode, &resolved_body)
+        .map(|prepared| prepared.has_body())
+        .unwrap_or_else(|_| !resolved_body.is_empty());
 
     let mut lines = vec![
         "curl".to_owned(),
         format!("  --request {}", shell_single_quote(&resolved_method)),
         format!("  --url {}", shell_single_quote(&resolved_url)),
     ];
+
+    if should_add_default_content_type(has_request_body, has_content_type_header) {
+        if let Some(content_type) = default_content_type_for_mode(body_mode, &resolved_body) {
+            lines.push(format!(
+                "  --header {}",
+                shell_single_quote(&format!("Content-Type: {content_type}"))
+            ));
+        }
+    }
 
     for header in &endpoint.headers {
         let resolved_key = resolve_placeholders(&header.key, env_vars);
@@ -2068,11 +2209,47 @@ fn build_curl_command(endpoint: &Endpoint, env_vars: &BTreeMap<String, String>) 
         lines.push(format!("  --header {}", shell_single_quote(&header_pair)));
     }
 
-    if !resolved_body.trim().is_empty() {
-        lines.push(format!(
-            "  --data-raw {}",
-            shell_single_quote(&resolved_body)
-        ));
+    match body_mode {
+        "none" => {}
+        "form-data" => {
+            for (key, value) in parse_body_fields(&resolved_body) {
+                if let Some(path) = value.strip_prefix('@') {
+                    lines.push(format!(
+                        "  --form {}",
+                        shell_single_quote(&format!("{key}=@{}", path.trim()))
+                    ));
+                } else {
+                    lines.push(format!(
+                        "  --form {}",
+                        shell_single_quote(&format!("{key}={value}"))
+                    ));
+                }
+            }
+        }
+        "binary" => {
+            if !resolved_body.is_empty() {
+                let trimmed = resolved_body.trim();
+                if let Some(path) = trimmed.strip_prefix('@') {
+                    lines.push(format!(
+                        "  --data-binary @{}",
+                        shell_single_quote(path.trim())
+                    ));
+                } else {
+                    lines.push(format!(
+                        "  --data-binary {}",
+                        shell_single_quote(&resolved_body)
+                    ));
+                }
+            }
+        }
+        _ => {
+            if !resolved_body.is_empty() {
+                lines.push(format!(
+                    "  --data-raw {}",
+                    shell_single_quote(&resolved_body)
+                ));
+            }
+        }
     }
 
     if lines.len() == 1 {
@@ -2133,6 +2310,7 @@ fn endpoint_dedup_key(endpoint: &Endpoint) -> String {
 
 fn merge_endpoint_details(existing: &mut Endpoint, incoming: Endpoint) -> bool {
     let mut changed = false;
+    let incoming_body_mode = normalize_body_mode(&incoming.body_mode).to_owned();
 
     if existing.source_collection_id.trim().is_empty()
         && !incoming.source_collection_id.trim().is_empty()
@@ -2185,6 +2363,16 @@ fn merge_endpoint_details(existing: &mut Endpoint, incoming: Endpoint) -> bool {
 
     if existing.body.trim().is_empty() && !incoming.body.trim().is_empty() {
         existing.body = incoming.body;
+        changed = true;
+    }
+    let existing_body_mode = normalize_body_mode(&existing.body_mode);
+    if (existing.body_mode.trim().is_empty()
+        || existing_body_mode == "none"
+        || existing_body_mode == "raw")
+        && incoming_body_mode != "none"
+        && incoming_body_mode != existing_body_mode
+    {
+        existing.body_mode = incoming_body_mode;
         changed = true;
     }
 
@@ -3133,6 +3321,7 @@ fn endpoint_from_requester_log_object(
         method,
         url: normalize_postman_placeholders(&url),
         headers: request_headers_from_data(object),
+        body_mode: request_body_mode_from_data(object),
         body: request_body_from_data(object),
     })
 }
@@ -3400,6 +3589,7 @@ fn endpoint_from_cache_object(
         method,
         url: normalize_postman_placeholders(&url),
         headers: request_headers_from_data(data),
+        body_mode: request_body_mode_from_data(data),
         body: request_body_from_data(data),
     })
 }
@@ -4110,6 +4300,26 @@ fn render_postman_body_payload(value: &serde_json::Value, mode: Option<&str>) ->
                 }
             }
 
+            if normalized_mode == "file" || normalized_mode == "binary" {
+                if let Some(file_object) = value.as_object() {
+                    if let Some(src) = file_object
+                        .get("src")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|src| !src.is_empty())
+                    {
+                        return format!("@{}", normalize_postman_placeholders(src));
+                    }
+                }
+                if let Some(path) = value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                {
+                    return format!("@{}", normalize_postman_placeholders(path));
+                }
+            }
+
             normalize_postman_placeholders(
                 &serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
             )
@@ -4552,9 +4762,19 @@ fn postman_request_body(request: &PostmanRequest) -> String {
         }
     }
     if let Some(formdata) = body.formdata.as_ref() {
+        let rendered_formdata = render_postman_formdata_fields(formdata);
+        if !rendered_formdata.trim().is_empty() {
+            return rendered_formdata;
+        }
         let value = serde_json::to_value(formdata).unwrap_or(serde_json::Value::Array(Vec::new()));
         let rendered =
             render_postman_body_payload(&value, body_mode.as_deref().or(Some("formdata")));
+        if !rendered.trim().is_empty() {
+            return rendered;
+        }
+    }
+    if let Some(file) = body.file.as_ref() {
+        let rendered = render_postman_body_payload(file, body_mode.as_deref().or(Some("file")));
         if !rendered.trim().is_empty() {
             return rendered;
         }
@@ -4569,6 +4789,74 @@ fn postman_request_body(request: &PostmanRequest) -> String {
     }
 
     String::new()
+}
+
+fn render_postman_formdata_fields(fields: &[PostmanField]) -> String {
+    let mut output = vec![];
+    for field in fields {
+        if field.disabled == Some(true) || field.enabled == Some(false) {
+            continue;
+        }
+
+        let Some(key) = field
+            .key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+        else {
+            continue;
+        };
+
+        let is_file = field
+            .field_type
+            .as_deref()
+            .map(|value| value.trim().eq_ignore_ascii_case("file"))
+            .unwrap_or(false);
+
+        if is_file {
+            let path = field
+                .src
+                .as_ref()
+                .map(postman_file_src_to_string)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_default();
+            if !path.is_empty() {
+                output.push(format!(
+                    "{}=@{}",
+                    normalize_postman_placeholders(key),
+                    normalize_postman_placeholders(path.trim())
+                ));
+            }
+            continue;
+        }
+
+        let value = field
+            .value
+            .as_ref()
+            .cloned()
+            .map(json_value_to_string)
+            .unwrap_or_default();
+        output.push(format!(
+            "{}={}",
+            normalize_postman_placeholders(key),
+            normalize_postman_placeholders(value.trim())
+        ));
+    }
+
+    output.join("\n")
+}
+
+fn postman_file_src_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(path) => path.to_owned(),
+        serde_json::Value::Array(paths) => paths
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|path| !path.trim().is_empty())
+            .unwrap_or_default()
+            .to_owned(),
+        _ => String::new(),
+    }
 }
 
 fn endpoint_from_postman_request(
@@ -4591,6 +4879,7 @@ fn endpoint_from_postman_request(
         .unwrap_or_else(|| "GET".to_owned());
 
     let headers = postman_request_headers(request);
+    let body_mode = postman_request_body_mode(request);
     let body = postman_request_body(request);
 
     Some(Endpoint {
@@ -4609,6 +4898,7 @@ fn endpoint_from_postman_request(
         method,
         url: normalize_postman_placeholders(&raw_url),
         headers,
+        body_mode,
         body,
     })
 }
@@ -4871,6 +5161,7 @@ mod tests {
                     value: "it's-live".to_owned(),
                 },
             ],
+            body_mode: "raw".to_owned(),
             body: "{\"name\":\"${name}\"}".to_owned(),
         };
 
@@ -4905,6 +5196,7 @@ mod tests {
                 key: "Bad Header".to_owned(),
                 value: "Bearer abc".to_owned(),
             }],
+            body_mode: "none".to_owned(),
             body: String::new(),
         };
 
@@ -4921,7 +5213,7 @@ mod tests {
     #[test]
     fn computed_default_content_length_sets_zero_for_empty_post() {
         assert_eq!(
-            computed_default_content_length(&Method::POST, false, false, ""),
+            computed_default_content_length(&Method::POST, false, None, false),
             Some("0".to_owned())
         );
     }
@@ -4930,7 +5222,7 @@ mod tests {
     fn computed_default_content_length_matches_body_size_when_present() {
         let body = "grant_type=client_credentials";
         assert!(
-            computed_default_content_length(&Method::POST, true, false, body)
+            computed_default_content_length(&Method::POST, false, Some(body.len()), true)
                 == Some(body.len().to_string())
         );
     }
@@ -4944,20 +5236,135 @@ mod tests {
 
     #[test]
     fn infer_default_content_type_prefers_json_for_json_bodies() {
-        assert_eq!(infer_default_content_type("{\"name\":\"joel\"}"), "application/json");
-        assert_eq!(infer_default_content_type("   [1,2,3]"), "application/json");
+        assert_eq!(
+            default_content_type_for_mode("raw", "{\"name\":\"joel\"}"),
+            Some("application/json")
+        );
+        assert_eq!(
+            default_content_type_for_mode("raw", "   [1,2,3]"),
+            Some("application/json")
+        );
     }
 
     #[test]
-    fn infer_default_content_type_falls_back_to_form_for_non_json_bodies() {
+    fn infer_default_content_type_falls_back_to_text_for_non_json_bodies() {
         assert_eq!(
-            infer_default_content_type("grant_type=client_credentials"),
-            "application/x-www-form-urlencoded"
+            default_content_type_for_mode("raw", "grant_type=client_credentials"),
+            Some("text/plain")
         );
         assert_eq!(
-            infer_default_content_type("plain text"),
-            "application/x-www-form-urlencoded"
+            default_content_type_for_mode("raw", "plain text"),
+            Some("text/plain")
         );
+    }
+
+    #[test]
+    fn default_content_type_changes_by_body_mode() {
+        assert_eq!(
+            default_content_type_for_mode("urlencoded", "a=1"),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(
+            default_content_type_for_mode("binary", "@/tmp/body.bin"),
+            Some("application/octet-stream")
+        );
+        assert_eq!(default_content_type_for_mode("form-data", "a=1"), None);
+    }
+
+    #[test]
+    fn normalize_body_mode_handles_aliases() {
+        assert_eq!(normalize_body_mode("formdata"), "form-data");
+        assert_eq!(normalize_body_mode("multipart/form-data"), "form-data");
+        assert_eq!(normalize_body_mode("x-www-form-urlencoded"), "urlencoded");
+        assert_eq!(normalize_body_mode("file"), "binary");
+        assert_eq!(normalize_body_mode("raw"), "raw");
+    }
+
+    #[test]
+    fn parse_body_fields_supports_line_and_ampersand_separated_values() {
+        let fields = parse_body_fields("a=1&b=2\nc=3");
+        assert_eq!(
+            fields,
+            vec![
+                ("a".to_owned(), "1".to_owned()),
+                ("b".to_owned(), "2".to_owned()),
+                ("c".to_owned(), "3".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn request_body_mode_from_data_detects_formdata_and_binary() {
+        let form_payload = serde_json::json!({
+            "body": {
+                "mode": "formdata",
+                "formdata": [{ "key": "name", "value": "joel" }]
+            }
+        });
+        assert_eq!(
+            request_body_mode_from_data(form_payload.as_object().expect("object")),
+            "form-data"
+        );
+
+        let binary_payload = serde_json::json!({
+            "body": {
+                "mode": "file",
+                "file": { "src": "/tmp/payload.bin" }
+            }
+        });
+        assert_eq!(
+            request_body_mode_from_data(binary_payload.as_object().expect("object")),
+            "binary"
+        );
+    }
+
+    #[test]
+    fn render_postman_formdata_fields_handles_file_and_text_values() {
+        let fields = vec![
+            PostmanField {
+                key: Some("metadata".to_owned()),
+                value: Some(serde_json::Value::String("abc".to_owned())),
+                field_type: Some("text".to_owned()),
+                src: None,
+                disabled: None,
+                enabled: None,
+            },
+            PostmanField {
+                key: Some("upload".to_owned()),
+                value: None,
+                field_type: Some("file".to_owned()),
+                src: Some(serde_json::Value::String("/tmp/payload.bin".to_owned())),
+                disabled: None,
+                enabled: None,
+            },
+        ];
+
+        assert_eq!(
+            render_postman_formdata_fields(&fields),
+            "metadata=abc\nupload=@/tmp/payload.bin"
+        );
+    }
+
+    #[test]
+    fn build_curl_command_uses_form_flag_for_form_data_mode() {
+        let endpoint = Endpoint {
+            id: "ep-test".to_owned(),
+            source_request_id: String::new(),
+            source_collection_id: String::new(),
+            source_folder_id: String::new(),
+            name: "Upload".to_owned(),
+            collection: "General".to_owned(),
+            folder_path: String::new(),
+            method: "POST".to_owned(),
+            url: "https://example.com/upload".to_owned(),
+            headers: vec![],
+            body_mode: "form-data".to_owned(),
+            body: "name=joel\nfile=@/tmp/payload.bin".to_owned(),
+        };
+        let curl = build_curl_command(&endpoint, &BTreeMap::new());
+
+        assert!(curl.contains("--form 'name=joel'"));
+        assert!(curl.contains("--form 'file=@/tmp/payload.bin'"));
     }
 
     #[test]
