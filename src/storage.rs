@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use directories::ProjectDirs;
 use walkdir::WalkDir;
 
-use crate::app_support::{
+use crate::domain::{
     decrypt_bytes, default_endpoints, default_environment_index, default_environments,
     default_variables_for_environment_name, encrypt_bytes, normalize_endpoint_url_and_query_params,
     normalize_folder_path, read_json_or_default, safe_path_segment, split_folder_path,

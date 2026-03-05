@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use reqwest::Method;
 
-use crate::app_support::{
+use crate::domain::{
     ImportScanResult, PostmanField, WorkspaceImportContext, build_curl_command, decrypt_bytes,
     deserialize_workspace_bundle, encrypt_bytes, endpoint_from_cache_object, execute_request,
     extract_import_entities_from_leveldb_binary, normalize_endpoint_url_and_query_params,

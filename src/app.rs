@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, TextEdit};
 
-use crate::app_support::{
+use crate::domain::{
     ImportScanResult, ImportSummary, ImportedEnvironment, build_curl_command, create_id,
     create_security_metadata, default_endpoints, default_environment_index, default_environments,
     default_postman_directories, deserialize_workspace_bundle, endpoint_dedup_key, execute_request,
