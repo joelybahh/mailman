@@ -73,6 +73,7 @@ pub(crate) struct MailmanApp {
     show_export_bundle_dialog: bool,
     export_bundle_password: String,
     export_bundle_password_confirm: String,
+    show_postman_import_dialog: bool,
     show_import_bundle_dialog: bool,
     import_bundle_path: Option<PathBuf>,
     import_bundle_password: String,
@@ -136,11 +137,12 @@ impl MailmanApp {
             new_environment_name: String::new(),
             postman_import_path: String::new(),
             postman_workspace_filter: String::new(),
-            show_environment_panel: true,
+            show_environment_panel: false,
             confirm_delete_all_requests: false,
             show_export_bundle_dialog: false,
             export_bundle_password: String::new(),
             export_bundle_password_confirm: String::new(),
+            show_postman_import_dialog: false,
             show_import_bundle_dialog: false,
             import_bundle_path: None,
             import_bundle_password: String::new(),
@@ -856,6 +858,76 @@ impl MailmanApp {
         }
     }
 
+    fn render_postman_import_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_postman_import_dialog {
+            return;
+        }
+
+        let mut open = self.show_postman_import_dialog;
+        let mut should_close = false;
+
+        egui::Window::new("Import From Postman")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label("Import requests and environments from Postman local data.");
+                ui.add(
+                    TextEdit::singleline(&mut self.postman_workspace_filter)
+                        .hint_text("Workspace filter (optional)"),
+                );
+
+                ui.horizontal(|ui| {
+                    ui.add(
+                        TextEdit::singleline(&mut self.postman_import_path)
+                            .desired_width(360.0)
+                            .hint_text("/path/to/Postman"),
+                    );
+                    if ui.button("Browse").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Select Postman Directory")
+                            .pick_folder()
+                        {
+                            self.postman_import_path = path.display().to_string();
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Auto Detect").clicked() {
+                        let workspace_filter =
+                            non_empty_trimmed(&self.postman_workspace_filter).map(str::to_owned);
+                        let summary =
+                            self.import_postman_from_defaults(workspace_filter.as_deref());
+                        self.status_line = summary.to_message();
+                        should_close = true;
+                    }
+
+                    if ui.button("Import Path").clicked() {
+                        let raw_path = self.postman_import_path.trim();
+                        if raw_path.is_empty() {
+                            self.status_line = "Enter a Postman path first.".to_owned();
+                            return;
+                        }
+
+                        let path = PathBuf::from(raw_path);
+                        let workspace_filter =
+                            non_empty_trimmed(&self.postman_workspace_filter).map(str::to_owned);
+                        let summary =
+                            self.import_postman_from_path(&path, workspace_filter.as_deref());
+                        self.status_line = summary.to_message();
+                        should_close = true;
+                    }
+
+                    if ui.button("Cancel").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+
+        self.show_postman_import_dialog = open && !should_close;
+    }
+
     fn render_auth_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -919,94 +991,29 @@ impl MailmanApp {
 
     fn render_toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
                 ui.label(RichText::new("Mail Man").strong().size(18.0));
                 ui.separator();
-                ui.label("Environment:");
 
-                let selected_name = self
-                    .selected_environment_index()
-                    .and_then(|idx| self.environments.get(idx))
-                    .map(|env| env.name.as_str())
-                    .unwrap_or("None");
-
-                egui::ComboBox::from_id_salt("environment-switcher")
-                    .selected_text(selected_name)
-                    .show_ui(ui, |ui| {
-                        let mut selection_changed = false;
-                        for env in &self.environments {
-                            let selected =
-                                self.selected_environment_id.as_deref() == Some(env.id.as_str());
-                            if ui.selectable_label(selected, &env.name).clicked() {
-                                self.selected_environment_id = Some(env.id.clone());
-                                selection_changed = true;
-                            }
-                        }
-                        if selection_changed {
-                            self.mark_dirty();
-                        }
-                    });
-
-                ui.add(
-                    TextEdit::singleline(&mut self.new_environment_name)
-                        .hint_text("new env (qa, sandbox)"),
-                );
-                if ui.button("Add Env").clicked() {
-                    let name = self.new_environment_name.trim().to_owned();
-                    if !name.is_empty() {
-                        self.add_environment(name);
-                        self.new_environment_name.clear();
+                ui.menu_button("Import", |ui| {
+                    if ui.button("Postman...").clicked() {
+                        self.show_postman_import_dialog = true;
+                        ui.close();
                     }
-                }
-                if ui.button("Delete Env").clicked() {
-                    self.delete_selected_environment();
-                }
 
-                ui.separator();
-                let send_button = ui.add_enabled(
-                    !self.in_flight,
-                    egui::Button::new(if self.in_flight { "Sending..." } else { "Send" }),
-                );
-                if send_button.clicked() {
-                    self.send_selected_request();
-                }
-                if ui.button("Copy cURL").clicked() {
-                    self.copy_curl_for_selected_request(ctx);
-                }
-                if ui
-                    .button(if self.show_environment_panel {
-                        "Hide Env Panel"
-                    } else {
-                        "Show Env Panel"
-                    })
-                    .clicked()
-                {
-                    self.show_environment_panel = !self.show_environment_panel;
-                }
-
-                ui.separator();
-                if ui.button("Import Postman (auto)").clicked() {
-                    let workspace_filter =
-                        non_empty_trimmed(&self.postman_workspace_filter).map(str::to_owned);
-                    let summary = self.import_postman_from_defaults(workspace_filter.as_deref());
-                    self.status_line = summary.to_message();
-                }
-
-                ui.add(
-                    TextEdit::singleline(&mut self.postman_workspace_filter)
-                        .hint_text("Workspace (e.g. Inspace Workspace)"),
-                );
-                ui.add(
-                    TextEdit::singleline(&mut self.postman_import_path)
-                        .hint_text("/path/to/Postman"),
-                );
-                if ui.button("Import Path").clicked() {
-                    let path = PathBuf::from(self.postman_import_path.trim());
-                    let workspace_filter =
-                        non_empty_trimmed(&self.postman_workspace_filter).map(str::to_owned);
-                    let summary = self.import_postman_from_path(&path, workspace_filter.as_deref());
-                    self.status_line = summary.to_message();
-                }
+                    if ui.button("Bundle...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Import Mail Man Bundle")
+                            .add_filter("Mail Man Bundle", &["mmbundle", "mailmanbundle", "json"])
+                            .pick_file()
+                        {
+                            self.import_bundle_path = Some(path);
+                            self.import_bundle_password.clear();
+                            self.show_import_bundle_dialog = true;
+                        }
+                        ui.close();
+                    }
+                });
 
                 if ui.button("Export Bundle").clicked() {
                     self.show_export_bundle_dialog = true;
@@ -1014,37 +1021,35 @@ impl MailmanApp {
                     self.export_bundle_password_confirm.clear();
                 }
 
-                if ui.button("Import Bundle").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_title("Import Mail Man Bundle")
-                        .add_filter("Mail Man Bundle", &["mmbundle", "mailmanbundle", "json"])
-                        .pick_file()
-                    {
-                        self.import_bundle_path = Some(path);
-                        self.import_bundle_password.clear();
-                        self.show_import_bundle_dialog = true;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !self.show_environment_panel && ui.button("Env Settings").clicked() {
+                        self.show_environment_panel = true;
                     }
-                }
 
-                if !self.confirm_delete_all_requests {
-                    if ui.button("Delete All Requests").clicked() {
-                        self.confirm_delete_all_requests = true;
-                    }
-                } else {
-                    ui.colored_label(Color32::from_rgb(240, 120, 120), "Confirm clear all?");
-                    if ui.button("Yes, Delete All").clicked() {
-                        self.delete_all_requests();
-                        self.confirm_delete_all_requests = false;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.confirm_delete_all_requests = false;
-                    }
-                }
+                    let selected_name = self
+                        .selected_environment_index()
+                        .and_then(|idx| self.environments.get(idx))
+                        .map(|env| env.name.as_str())
+                        .unwrap_or("None");
 
-                if ui.button("Save Now").clicked() {
-                    self.last_mutation = Instant::now() - Duration::from_secs(1);
-                    self.try_auto_save();
-                }
+                    let mut selection_changed = false;
+                    egui::ComboBox::from_id_salt("environment-switcher")
+                        .selected_text(selected_name)
+                        .show_ui(ui, |ui| {
+                            for env in &self.environments {
+                                let selected = self.selected_environment_id.as_deref()
+                                    == Some(env.id.as_str());
+                                if ui.selectable_label(selected, &env.name).clicked() {
+                                    self.selected_environment_id = Some(env.id.clone());
+                                    selection_changed = true;
+                                }
+                            }
+                        });
+                    if selection_changed {
+                        self.mark_dirty();
+                    }
+                    ui.label("Environment:");
+                });
             });
         });
     }
@@ -1061,6 +1066,26 @@ impl MailmanApp {
                     }
                     if ui.button("-").clicked() {
                         self.delete_selected_endpoint();
+                    }
+                    ui.separator();
+                    if !self.confirm_delete_all_requests {
+                        if ui.button("Delete All").clicked() {
+                            self.confirm_delete_all_requests = true;
+                        }
+                    } else {
+                        ui.colored_label(Color32::from_rgb(240, 120, 120), "Confirm clear all?");
+                        if ui.button("Yes").clicked() {
+                            self.delete_all_requests();
+                            self.confirm_delete_all_requests = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_delete_all_requests = false;
+                        }
+                    }
+
+                    if ui.button("Save Now").clicked() {
+                        self.last_mutation = Instant::now() - Duration::from_secs(1);
+                        self.try_auto_save();
                     }
                 });
                 ui.separator();
@@ -1144,8 +1169,34 @@ impl MailmanApp {
             .resizable(true)
             .default_width(320.0)
             .show(ctx, |ui| {
-                ui.heading("Environment Variables");
+                ui.horizontal(|ui| {
+                    ui.heading("Environment Variables");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            self.show_environment_panel = false;
+                        }
+                    });
+                });
                 ui.label("Each environment is stored in its own encrypted offline file.");
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.add(
+                        TextEdit::singleline(&mut self.new_environment_name)
+                            .desired_width(160.0)
+                            .hint_text("new env (qa, sandbox)"),
+                    );
+                    if ui.button("Add Env").clicked() {
+                        let name = self.new_environment_name.trim().to_owned();
+                        if !name.is_empty() {
+                            self.add_environment(name);
+                            self.new_environment_name.clear();
+                        }
+                    }
+                    if ui.button("Delete Env").clicked() {
+                        self.delete_selected_environment();
+                    }
+                });
                 ui.separator();
 
                 let Some(index) = self.selected_environment_index() else {
@@ -1207,7 +1258,22 @@ impl MailmanApp {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.heading("Request Builder");
+                    ui.horizontal(|ui| {
+                        ui.heading("Request Builder");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Copy cURL").clicked() {
+                                self.copy_curl_for_selected_request(ctx);
+                            }
+
+                            let send_button = ui.add_enabled(
+                                !self.in_flight,
+                                egui::Button::new(if self.in_flight { "Sending..." } else { "Send" }),
+                            );
+                            if send_button.clicked() {
+                                self.send_selected_request();
+                            }
+                        });
+                    });
                     ui.separator();
 
                     let Some(index) = self.selected_endpoint_index() else {
@@ -1472,9 +1538,6 @@ impl MailmanApp {
                     let env_vars = self.selected_environment_variables();
                     let resolved_url = resolve_endpoint_url(&self.endpoints[index], &env_vars);
                     ui.label(format!("Resolved URL (preview): {resolved_url}"));
-                    if ui.button("Copy cURL for Selected Request").clicked() {
-                        self.copy_curl_for_selected_request(ctx);
-                    }
                     ui.label(
                         "Use ${variable_name} placeholders in URL, params, headers, and body.",
                     );
@@ -1570,6 +1633,7 @@ impl eframe::App for MailmanApp {
         }
         self.render_request_editor(ctx);
         self.render_response_panel(ctx);
+        self.render_postman_import_dialog(ctx);
         self.render_share_bundle_dialogs(ctx);
         self.render_status_line(ctx);
 
