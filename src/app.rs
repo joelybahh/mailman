@@ -167,6 +167,73 @@ impl MailmanApp {
         self.last_mutation = Instant::now();
     }
 
+    fn attach_text_context_menu(response: &egui::Response, current_text: &str, editable: bool) {
+        let text_edit_id = response.id;
+        let text_char_count = current_text.chars().count();
+        let selection_backup_id = text_edit_id.with("selection_backup");
+
+        if let Some(state) = egui::TextEdit::load_state(&response.ctx, text_edit_id)
+            && let Some(range) = state.cursor.char_range()
+            && !range.is_empty()
+            && !response.secondary_clicked()
+        {
+            response
+                .ctx
+                .data_mut(|data| data.insert_temp(selection_backup_id, range));
+        }
+
+        if response.secondary_clicked()
+            && let Some(saved_range) = response
+                .ctx
+                .data(|data| data.get_temp::<egui::text::CCursorRange>(selection_backup_id))
+            && let Some(mut state) = egui::TextEdit::load_state(&response.ctx, text_edit_id)
+        {
+            state.cursor.set_char_range(Some(saved_range));
+            egui::TextEdit::store_state(&response.ctx, text_edit_id, state);
+        }
+
+        response.context_menu(move |ui| {
+            if editable && ui.button("Cut").clicked() {
+                ui.ctx()
+                    .memory_mut(|memory| memory.request_focus(text_edit_id));
+                ui.ctx()
+                    .input_mut(|input| input.events.push(egui::Event::Cut));
+                ui.close();
+            }
+
+            if ui.button("Copy").clicked() {
+                ui.ctx()
+                    .memory_mut(|memory| memory.request_focus(text_edit_id));
+                ui.ctx()
+                    .input_mut(|input| input.events.push(egui::Event::Copy));
+                ui.close();
+            }
+
+            if editable && ui.button("Paste").clicked() {
+                ui.ctx()
+                    .memory_mut(|memory| memory.request_focus(text_edit_id));
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                ui.close();
+            }
+
+            if ui.button("Select All").clicked() {
+                ui.ctx()
+                    .memory_mut(|memory| memory.request_focus(text_edit_id));
+                let mut state =
+                    egui::TextEdit::load_state(ui.ctx(), text_edit_id).unwrap_or_default();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(text_char_count),
+                    )));
+                egui::TextEdit::store_state(ui.ctx(), text_edit_id, state);
+                ui.close();
+            }
+        });
+    }
+
     fn sync_window_resolution(&mut self, ctx: &egui::Context) {
         let Some(inner_rect) = ctx.input(|input| input.viewport().inner_rect) else {
             return;
@@ -193,7 +260,7 @@ impl MailmanApp {
             .and_then(|id| self.endpoints.iter().find(|item| &item.id == id))
             .is_none()
         {
-            self.selected_endpoint_id = self.endpoints.first().map(|item| item.id.clone());
+            self.set_selected_endpoint(self.endpoints.first().map(|item| item.id.clone()));
         }
 
         if self
@@ -263,6 +330,24 @@ impl MailmanApp {
         }
 
         variables
+    }
+
+    fn reset_response_ui_for_request_switch(&mut self) {
+        self.response = ResponseState::default();
+        self.response_body_view.clear();
+        self.parsed_response_json = None;
+        self.parsed_response_json_error = None;
+        self.in_flight = false;
+        self.response_rx = None;
+    }
+
+    fn set_selected_endpoint(&mut self, endpoint_id: Option<String>) {
+        if self.selected_endpoint_id == endpoint_id {
+            return;
+        }
+
+        self.selected_endpoint_id = endpoint_id;
+        self.reset_response_ui_for_request_switch();
     }
 
     fn handle_setup_password_submission(&mut self) {
@@ -382,7 +467,7 @@ impl MailmanApp {
             body_mode: "none".to_owned(),
             body: String::new(),
         });
-        self.selected_endpoint_id = Some(id);
+        self.set_selected_endpoint(Some(id));
         self.mark_dirty();
     }
 
@@ -391,14 +476,14 @@ impl MailmanApp {
             return;
         };
         self.endpoints.remove(index);
-        self.selected_endpoint_id = self.endpoints.first().map(|item| item.id.clone());
+        self.set_selected_endpoint(self.endpoints.first().map(|item| item.id.clone()));
         self.mark_dirty();
     }
 
     fn delete_all_requests(&mut self) {
         let removed = self.endpoints.len();
         self.endpoints.clear();
-        self.selected_endpoint_id = None;
+        self.set_selected_endpoint(None);
         self.config.selected_endpoint_id = None;
         self.mark_dirty();
         self.status_line = format!("Cleared {removed} requests.");
@@ -528,19 +613,38 @@ impl MailmanApp {
     fn render_json_leaf(
         ui: &mut egui::Ui,
         key: Option<&str>,
+        path: &str,
         value_text: impl Into<String>,
         value_color: Color32,
     ) {
+        let rendered_text = value_text.into();
         ui.horizontal_wrapped(|ui| {
             if let Some(key) = key {
                 ui.label(RichText::new(key).strong());
                 ui.label(":");
             }
-            ui.label(
-                RichText::new(value_text.into())
-                    .color(value_color)
-                    .monospace(),
+            let response = ui.add(
+                egui::Label::new(
+                    RichText::new(rendered_text.clone())
+                        .color(value_color)
+                        .monospace(),
+                )
+                .sense(egui::Sense::click()),
             );
+
+            if response.double_clicked() {
+                ui.ctx().copy_text(rendered_text.clone());
+            }
+            response.context_menu(|ui| {
+                if ui.button("Copy Value").clicked() {
+                    ui.ctx().copy_text(rendered_text.clone());
+                    ui.close();
+                }
+                if ui.button("Copy JSON Path").clicked() {
+                    ui.ctx().copy_text(path.to_owned());
+                    ui.close();
+                }
+            });
         });
     }
 
@@ -586,6 +690,7 @@ impl MailmanApp {
                 Self::render_json_leaf(
                     ui,
                     key,
+                    path,
                     format!("\"{text}\""),
                     Color32::from_rgb(120, 210, 170),
                 );
@@ -594,6 +699,7 @@ impl MailmanApp {
                 Self::render_json_leaf(
                     ui,
                     key,
+                    path,
                     number.to_string(),
                     Color32::from_rgb(240, 200, 120),
                 );
@@ -602,12 +708,13 @@ impl MailmanApp {
                 Self::render_json_leaf(
                     ui,
                     key,
+                    path,
                     value.to_string(),
                     Color32::from_rgb(130, 180, 255),
                 );
             }
             serde_json::Value::Null => {
-                Self::render_json_leaf(ui, key, "null", Color32::GRAY);
+                Self::render_json_leaf(ui, key, path, "null", Color32::GRAY);
             }
         }
     }
@@ -875,15 +982,21 @@ impl MailmanApp {
                 .collapsible(false)
                 .show(ctx, |ui| {
                     ui.label("Create a password-protected bundle that can be imported on any OS.");
-                    ui.add(
+                    let response = ui.add(
                         TextEdit::singleline(&mut self.export_bundle_password)
                             .password(true)
                             .hint_text("Bundle password"),
                     );
-                    ui.add(
+                    Self::attach_text_context_menu(&response, &self.export_bundle_password, true);
+                    let response = ui.add(
                         TextEdit::singleline(&mut self.export_bundle_password_confirm)
                             .password(true)
                             .hint_text("Confirm bundle password"),
+                    );
+                    Self::attach_text_context_menu(
+                        &response,
+                        &self.export_bundle_password_confirm,
+                        true,
                     );
 
                     ui.horizontal(|ui| {
@@ -954,11 +1067,12 @@ impl MailmanApp {
                         ui.colored_label(Color32::from_rgb(240, 120, 120), "No bundle file selected.");
                     }
 
-                    ui.add(
+                    let response = ui.add(
                         TextEdit::singleline(&mut self.import_bundle_password)
                             .password(true)
                             .hint_text("Bundle password"),
                     );
+                    Self::attach_text_context_menu(&response, &self.import_bundle_password, true);
 
                     ui.horizontal(|ui| {
                         if ui.button("Import").clicked() {
@@ -1015,17 +1129,19 @@ impl MailmanApp {
             .collapsible(false)
             .show(ctx, |ui| {
                 ui.label("Import requests and environments from Postman local data.");
-                ui.add(
+                let response = ui.add(
                     TextEdit::singleline(&mut self.postman_workspace_filter)
                         .hint_text("Workspace filter (optional)"),
                 );
+                Self::attach_text_context_menu(&response, &self.postman_workspace_filter, true);
 
                 ui.horizontal(|ui| {
-                    ui.add(
+                    let response = ui.add(
                         TextEdit::singleline(&mut self.postman_import_path)
                             .desired_width(360.0)
                             .hint_text("/path/to/Postman"),
                     );
+                    Self::attach_text_context_menu(&response, &self.postman_import_path, true);
                     if ui.button("Browse").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .set_title("Select Postman Directory")
@@ -1088,15 +1204,21 @@ impl MailmanApp {
                         );
                         ui.add_space(12.0);
 
-                        ui.add(
+                        let response = ui.add(
                             TextEdit::singleline(&mut self.setup_password)
                                 .password(true)
                                 .hint_text("Master password"),
                         );
-                        ui.add(
+                        Self::attach_text_context_menu(&response, &self.setup_password, true);
+                        let response = ui.add(
                             TextEdit::singleline(&mut self.setup_password_confirm)
                                 .password(true)
                                 .hint_text("Confirm password"),
+                        );
+                        Self::attach_text_context_menu(
+                            &response,
+                            &self.setup_password_confirm,
+                            true,
                         );
 
                         if ui.button("Configure Encryption and Open").clicked() {
@@ -1106,11 +1228,12 @@ impl MailmanApp {
                     AppPhase::UnlockPassword => {
                         ui.label("Enter your master password to decrypt environment variables.");
                         ui.add_space(12.0);
-                        ui.add(
+                        let response = ui.add(
                             TextEdit::singleline(&mut self.unlock_password)
                                 .password(true)
                                 .hint_text("Master password"),
                         );
+                        Self::attach_text_context_menu(&response, &self.unlock_password, true);
 
                         if ui.button("Unlock").clicked() {
                             self.handle_unlock_password_submission();
@@ -1258,17 +1381,21 @@ impl MailmanApp {
                                         let endpoint = &self.endpoints[endpoint_index];
                                         let is_selected = self.selected_endpoint_id.as_deref()
                                             == Some(endpoint.id.as_str());
+                                        let endpoint_id = endpoint.id.clone();
+                                        let endpoint_method = endpoint.method.clone();
+                                        let endpoint_name = endpoint.name.clone();
                                         ui.horizontal(|ui| {
                                             ui.colored_label(
-                                                method_color(&endpoint.method),
-                                                &endpoint.method,
+                                                method_color(&endpoint_method),
+                                                &endpoint_method,
                                             );
                                             if ui
-                                                .selectable_label(is_selected, &endpoint.name)
+                                                .selectable_label(is_selected, &endpoint_name)
                                                 .clicked()
                                             {
-                                                self.selected_endpoint_id =
-                                                    Some(endpoint.id.clone());
+                                                self.set_selected_endpoint(Some(
+                                                    endpoint_id.clone(),
+                                                ));
                                                 selection_changed = true;
                                             }
                                         });
@@ -1279,17 +1406,21 @@ impl MailmanApp {
                                             let endpoint = &self.endpoints[endpoint_index];
                                             let is_selected = self.selected_endpoint_id.as_deref()
                                                 == Some(endpoint.id.as_str());
+                                            let endpoint_id = endpoint.id.clone();
+                                            let endpoint_method = endpoint.method.clone();
+                                            let endpoint_name = endpoint.name.clone();
                                             ui.horizontal(|ui| {
                                                 ui.colored_label(
-                                                    method_color(&endpoint.method),
-                                                    &endpoint.method,
+                                                    method_color(&endpoint_method),
+                                                    &endpoint_method,
                                                 );
                                                 if ui
-                                                    .selectable_label(is_selected, &endpoint.name)
+                                                    .selectable_label(is_selected, &endpoint_name)
                                                     .clicked()
                                                 {
-                                                    self.selected_endpoint_id =
-                                                        Some(endpoint.id.clone());
+                                                    self.set_selected_endpoint(Some(
+                                                        endpoint_id.clone(),
+                                                    ));
                                                     selection_changed = true;
                                                 }
                                             });
@@ -1324,11 +1455,12 @@ impl MailmanApp {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    ui.add(
+                    let response = ui.add(
                         TextEdit::singleline(&mut self.new_environment_name)
                             .desired_width(160.0)
                             .hint_text("new env (qa, sandbox)"),
                     );
+                    Self::attach_text_context_menu(&response, &self.new_environment_name, true);
                     if ui.button("Add Env").clicked() {
                         let name = self.new_environment_name.trim().to_owned();
                         if !name.is_empty() {
@@ -1353,7 +1485,9 @@ impl MailmanApp {
                 {
                     let env = &mut self.environments[index];
 
-                    if ui.text_edit_singleline(&mut env.name).changed() {
+                    let response = ui.text_edit_singleline(&mut env.name);
+                    Self::attach_text_context_menu(&response, &env.name, true);
+                    if response.changed() {
                         changed = true;
                     }
                     ui.label(format!("File: {}", env.file_name));
@@ -1361,16 +1495,16 @@ impl MailmanApp {
 
                     for (variable_index, variable) in env.variables.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            if ui
-                                .add(TextEdit::singleline(&mut variable.key).hint_text("key"))
-                                .changed()
-                            {
+                            let response =
+                                ui.add(TextEdit::singleline(&mut variable.key).hint_text("key"));
+                            Self::attach_text_context_menu(&response, &variable.key, true);
+                            if response.changed() {
                                 changed = true;
                             }
-                            if ui
-                                .add(TextEdit::singleline(&mut variable.value).hint_text("value"))
-                                .changed()
-                            {
+                            let response = ui
+                                .add(TextEdit::singleline(&mut variable.value).hint_text("value"));
+                            Self::attach_text_context_menu(&response, &variable.value, true);
+                            if response.changed() {
                                 changed = true;
                             }
                             if ui.button("x").clicked() {
@@ -1434,41 +1568,37 @@ impl MailmanApp {
 
                         ui.horizontal(|ui| {
                             ui.label("Name");
-                            if ui
-                                .add(
-                                    TextEdit::singleline(&mut endpoint.name)
-                                        .desired_width(f32::INFINITY),
-                                )
-                                .changed()
-                            {
+                            let response = ui.add(
+                                TextEdit::singleline(&mut endpoint.name).desired_width(f32::INFINITY),
+                            );
+                            Self::attach_text_context_menu(&response, &endpoint.name, true);
+                            if response.changed() {
                                 changed = true;
                             }
                         });
 
                         ui.horizontal(|ui| {
                             ui.label("Collection");
-                            if ui
-                                .add(
-                                    TextEdit::singleline(&mut endpoint.collection)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("Inspace API V3"),
-                                )
-                                .changed()
-                            {
+                            let response = ui.add(
+                                TextEdit::singleline(&mut endpoint.collection)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("Inspace API V3"),
+                            );
+                            Self::attach_text_context_menu(&response, &endpoint.collection, true);
+                            if response.changed() {
                                 changed = true;
                             }
                         });
 
                         ui.horizontal(|ui| {
                             ui.label("Folder");
-                            if ui
-                                .add(
-                                    TextEdit::singleline(&mut endpoint.folder_path)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("Micro / Query / Native"),
-                                )
-                                .changed()
-                            {
+                            let response = ui.add(
+                                TextEdit::singleline(&mut endpoint.folder_path)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("Micro / Query / Native"),
+                            );
+                            Self::attach_text_context_menu(&response, &endpoint.folder_path, true);
+                            if response.changed() {
                                 changed = true;
                             }
                         });
@@ -1488,14 +1618,13 @@ impl MailmanApp {
                                     }
                                 });
 
-                            if ui
-                                .add(
-                                    TextEdit::singleline(&mut endpoint.url)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("https://${api_host}/resource"),
-                                )
-                                .changed()
-                            {
+                            let response = ui.add(
+                                TextEdit::singleline(&mut endpoint.url)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("https://${api_host}/resource"),
+                            );
+                            Self::attach_text_context_menu(&response, &endpoint.url, true);
+                            if response.changed() {
                                 normalize_endpoint_url_and_query_params(endpoint);
                                 changed = true;
                             }
@@ -1544,24 +1673,20 @@ impl MailmanApp {
                                             (row_width - key_width - remove_width - (spacing * 2.0))
                                                 .max(120.0);
 
-                                        if ui
-                                            .add_sized(
-                                                [key_width, 0.0],
-                                                TextEdit::singleline(&mut param.key)
-                                                    .hint_text("Param key"),
-                                            )
-                                            .changed()
-                                        {
+                                        let response = ui.add_sized(
+                                            [key_width, 0.0],
+                                            TextEdit::singleline(&mut param.key).hint_text("Param key"),
+                                        );
+                                        Self::attach_text_context_menu(&response, &param.key, true);
+                                        if response.changed() {
                                             changed = true;
                                         }
-                                        if ui
-                                            .add_sized(
-                                                [value_width, 0.0],
-                                                TextEdit::singleline(&mut param.value)
-                                                    .hint_text("Param value"),
-                                            )
-                                            .changed()
-                                        {
+                                        let response = ui.add_sized(
+                                            [value_width, 0.0],
+                                            TextEdit::singleline(&mut param.value).hint_text("Param value"),
+                                        );
+                                        Self::attach_text_context_menu(&response, &param.value, true);
+                                        if response.changed() {
                                             changed = true;
                                         }
                                         if ui
@@ -1596,24 +1721,20 @@ impl MailmanApp {
                                             (row_width - key_width - remove_width - (spacing * 2.0))
                                                 .max(120.0);
 
-                                        if ui
-                                            .add_sized(
-                                                [key_width, 0.0],
-                                                TextEdit::singleline(&mut header.key)
-                                                    .hint_text("Header name"),
-                                            )
-                                            .changed()
-                                        {
+                                        let response = ui.add_sized(
+                                            [key_width, 0.0],
+                                            TextEdit::singleline(&mut header.key).hint_text("Header name"),
+                                        );
+                                        Self::attach_text_context_menu(&response, &header.key, true);
+                                        if response.changed() {
                                             changed = true;
                                         }
-                                        if ui
-                                            .add_sized(
-                                                [value_width, 0.0],
-                                                TextEdit::singleline(&mut header.value)
-                                                    .hint_text("Header value"),
-                                            )
-                                            .changed()
-                                        {
+                                        let response = ui.add_sized(
+                                            [value_width, 0.0],
+                                            TextEdit::singleline(&mut header.value).hint_text("Header value"),
+                                        );
+                                        Self::attach_text_context_menu(&response, &header.value, true);
+                                        if response.changed() {
                                             changed = true;
                                         }
                                         if ui
@@ -1655,17 +1776,16 @@ impl MailmanApp {
                                             }
                                         });
                                 });
-                                if ui
-                                    .add(
-                                        TextEdit::multiline(&mut endpoint.body)
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(12)
-                                            .hint_text(
-                                                "{\n  \"token\": \"${token}\"\n}\nOR\nkey=value\nkey2=value2",
-                                            ),
-                                    )
-                                    .changed()
-                                {
+                                let response = ui.add(
+                                    TextEdit::multiline(&mut endpoint.body)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(12)
+                                        .hint_text(
+                                            "{\n  \"token\": \"${token}\"\n}\nOR\nkey=value\nkey2=value2",
+                                        ),
+                                );
+                                Self::attach_text_context_menu(&response, &endpoint.body, true);
+                                if response.changed() {
                                     changed = true;
                                 }
                             }
@@ -1740,11 +1860,16 @@ impl MailmanApp {
                         match self.response_view_tab {
                             ResponseViewTab::Raw => {
                                 let body_height = ui.available_height().max(120.0);
-                                ui.add_sized(
+                                let response = ui.add_sized(
                                     [ui.available_width(), body_height],
                                     TextEdit::multiline(&mut self.response_body_view)
                                         .desired_width(f32::INFINITY)
                                         .code_editor(),
+                                );
+                                Self::attach_text_context_menu(
+                                    &response,
+                                    &self.response_body_view,
+                                    true,
                                 );
                             }
                             ResponseViewTab::Pretty => {
