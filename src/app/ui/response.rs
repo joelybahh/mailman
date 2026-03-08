@@ -16,20 +16,27 @@ impl MailmanApp {
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.heading("Response");
+                    ui.label(RichText::new("Response").strong().size(14.0));
                     if let Some(status_code) = self.response.status_code {
                         let color = theme::status_code_color(status_code);
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new(format!(
-                                "{} {}",
-                                status_code, self.response.status_text
-                            ))
-                            .strong()
-                            .color(color),
-                        );
+                        ui.add_space(6.0);
+                        // Pill-style status badge
+                        egui::Frame::default()
+                            .corner_radius(egui::CornerRadius::same(4))
+                            .fill(color.gamma_multiply(0.18))
+                            .inner_margin(egui::Margin { left: 6, right: 6, top: 1, bottom: 1 })
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} {}",
+                                        status_code, self.response.status_text
+                                    ))
+                                    .strong()
+                                    .size(12.0)
+                                    .color(color),
+                                );
+                            });
                         if let Some(duration) = self.response.duration_ms {
-                            ui.separator();
                             ui.label(
                                 RichText::new(format!("{duration} ms"))
                                     .color(theme::MUTED)
@@ -37,11 +44,12 @@ impl MailmanApp {
                             );
                         }
                     } else if !self.response.status_text.is_empty() {
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
                         ui.label(
                             RichText::new(&self.response.status_text)
                                 .color(theme::MUTED)
-                                .italics(),
+                                .italics()
+                                .size(13.0),
                         );
                     }
                 });

@@ -16,6 +16,15 @@ fn main() -> eframe::Result<()> {
     {
         // Use the bundled app icon on macOS to match Dock sizing behavior.
         viewport = viewport.with_icon(eframe::egui::IconData::default());
+        // Make the title bar transparent and extend content behind it, so the
+        // toolbar sits next to the traffic-light buttons (Xcode / Arc style).
+        // with_titlebar_shown(false) = transparent titlebar (content shows through)
+        // with_fullsize_content_view(true) = content rect fills the whole window
+        // with_title_shown(false) = no "Mail Man" text in the title bar
+        viewport = viewport
+            .with_titlebar_shown(false)
+            .with_fullsize_content_view(true)
+            .with_title_shown(false);
     }
 
     #[cfg(not(target_os = "macos"))]

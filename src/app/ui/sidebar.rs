@@ -15,23 +15,40 @@ impl MailmanApp {
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.heading("Requests");
+                    ui.label(RichText::new("Requests").strong().size(14.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Save").clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("Save").size(12.0))
+                                    .fill(egui::Color32::TRANSPARENT),
+                            )
+                            .on_hover_text("Save now")
+                            .clicked()
+                        {
                             use std::time::{Duration, Instant};
                             self.last_mutation = Instant::now() - Duration::from_secs(1);
                             self.try_auto_save();
                         }
                         ui.separator();
                         if ui
-                            .small_button("-")
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("−").color(theme::MUTED).size(14.0),
+                                )
+                                .frame(false),
+                            )
                             .on_hover_text("Delete selected")
                             .clicked()
                         {
                             self.delete_selected_endpoint();
                         }
                         if ui
-                            .small_button("+")
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("+").color(super::theme::ACCENT).size(16.0),
+                                )
+                                .frame(false),
+                            )
                             .on_hover_text("New request")
                             .clicked()
                         {
