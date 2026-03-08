@@ -5,6 +5,7 @@ use eframe::egui::{self, RichText};
 use crate::app::MailmanApp;
 use crate::domain::{method_color, non_empty_trimmed};
 
+use super::shared::HandCursor;
 use super::theme;
 
 impl MailmanApp {
@@ -16,6 +17,40 @@ impl MailmanApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Requests").strong().size(14.0));
+
+                    // Delete All / confirmation inline, right after the heading
+                    ui.add_space(4.0);
+                    if !self.confirm_delete_all_requests {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Delete All")
+                                        .color(theme::MUTED)
+                                        .size(11.0),
+                                )
+                                .frame(false),
+                            )
+                            .cursor_hand()
+                            .clicked()
+                        {
+                            self.confirm_delete_all_requests = true;
+                        }
+                    } else {
+                        ui.label(
+                            RichText::new("Clear all?")
+                                .color(theme::WARNING)
+                                .size(11.0),
+                        );
+                        if ui.small_button("Yes").cursor_hand().clicked() {
+                            self.delete_all_requests();
+                            self.confirm_delete_all_requests = false;
+                        }
+                        if ui.small_button("No").cursor_hand().clicked() {
+                            self.confirm_delete_all_requests = false;
+                        }
+                    }
+
+                    // Right side: + − Save
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
@@ -23,6 +58,7 @@ impl MailmanApp {
                                     .fill(egui::Color32::TRANSPARENT),
                             )
                             .on_hover_text("Save now")
+                            .cursor_hand()
                             .clicked()
                         {
                             use std::time::{Duration, Instant};
@@ -38,6 +74,7 @@ impl MailmanApp {
                                 .frame(false),
                             )
                             .on_hover_text("Delete selected")
+                            .cursor_hand()
                             .clicked()
                         {
                             self.delete_selected_endpoint();
@@ -45,36 +82,19 @@ impl MailmanApp {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new("+").color(super::theme::ACCENT).size(16.0),
+                                    RichText::new("+")
+                                        .color(super::theme::ACCENT)
+                                        .size(16.0),
                                 )
                                 .frame(false),
                             )
                             .on_hover_text("New request")
+                            .cursor_hand()
                             .clicked()
                         {
                             self.add_endpoint();
                         }
                     });
-                });
-
-                ui.horizontal(|ui| {
-                    if !self.confirm_delete_all_requests {
-                        if ui
-                            .small_button(RichText::new("Delete All").color(theme::MUTED))
-                            .clicked()
-                        {
-                            self.confirm_delete_all_requests = true;
-                        }
-                    } else {
-                        ui.colored_label(theme::WARNING, "Clear all requests?");
-                        if ui.small_button("Yes").clicked() {
-                            self.delete_all_requests();
-                            self.confirm_delete_all_requests = false;
-                        }
-                        if ui.small_button("Cancel").clicked() {
-                            self.confirm_delete_all_requests = false;
-                        }
-                    }
                 });
 
                 ui.separator();
@@ -121,7 +141,7 @@ impl MailmanApp {
                                             } else {
                                                 RichText::new(&endpoint_name)
                                             };
-                                            if ui.selectable_label(is_selected, name).clicked() {
+                                            if ui.selectable_label(is_selected, name).cursor_hand().clicked() {
                                                 self.set_selected_endpoint(Some(
                                                     endpoint_id.clone(),
                                                 ));
@@ -159,6 +179,7 @@ impl MailmanApp {
                                                     };
                                                     if ui
                                                         .selectable_label(is_selected, name)
+                                                        .cursor_hand()
                                                         .clicked()
                                                     {
                                                         self.set_selected_endpoint(Some(

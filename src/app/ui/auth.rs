@@ -2,7 +2,7 @@ use eframe::egui::{self, Color32, RichText, TextEdit};
 
 use crate::app::{AppPhase, MailmanApp};
 
-use super::shared::attach_text_context_menu;
+use super::shared::{attach_text_context_menu, HandCursor};
 use super::theme;
 
 const LOGO_BYTES: &[u8] = include_bytes!("../../../assets/icons/128x128@2x.png");
@@ -116,7 +116,7 @@ impl MailmanApp {
                                 )
                                 .fill(theme::ACCENT)
                                 .min_size(egui::vec2(ui.available_width(), 32.0));
-                                if ui.add(btn).clicked() {
+                                if ui.add(btn).cursor_hand().clicked() {
                                     self.handle_setup_password_submission();
                                 }
                             }
@@ -147,7 +147,7 @@ impl MailmanApp {
                                 )
                                 .fill(theme::ACCENT)
                                 .min_size(egui::vec2(ui.available_width(), 32.0));
-                                if ui.add(btn).clicked() {
+                                if ui.add(btn).cursor_hand().clicked() {
                                     self.handle_unlock_password_submission();
                                 }
                             }

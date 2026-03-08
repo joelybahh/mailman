@@ -1,6 +1,21 @@
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32, CursorIcon, RichText};
 
 use super::theme;
+
+/// Convenience extension — chain `.cursor_hand()` on any [`egui::Response`] to show a
+/// pointer cursor when hovered. This is the only reliable per-widget mechanism
+/// in this version of egui (`style.visuals.interact_cursor` is defined but
+/// never read by widget rendering).
+pub(in crate::app) trait HandCursor: Sized {
+    fn cursor_hand(self) -> Self;
+}
+
+impl HandCursor for egui::Response {
+    #[inline]
+    fn cursor_hand(self) -> Self {
+        self.on_hover_cursor(CursorIcon::PointingHand)
+    }
+}
 
 pub(in crate::app) fn attach_text_context_menu(
     response: &egui::Response,

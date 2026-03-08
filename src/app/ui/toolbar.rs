@@ -2,14 +2,12 @@ use eframe::egui::{self, Color32, RichText};
 
 use crate::app::MailmanApp;
 
+use super::shared::HandCursor;
 use super::theme;
 
-/// Horizontal space (px) reserved on macOS for the traffic-light buttons.
 #[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_PAD: f32 = 80.0;
 
-/// Height of the toolbar panel. On macOS this must be at least the title-bar
-/// height (~28 px) so our content overlaps the transparent native bar cleanly.
 #[cfg(target_os = "macos")]
 const TOOLBAR_HEIGHT: f32 = 36.0;
 
@@ -20,16 +18,11 @@ impl MailmanApp {
     pub(in crate::app) fn render_toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar")
             .exact_height(TOOLBAR_HEIGHT)
-            // Make the panel draggable on macOS – users can grab the toolbar to
-            // move the window, just as they would a native title bar.
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    // On macOS leave room for the traffic-light buttons (close /
-                    // minimise / full-screen) that the OS renders at the left.
                     #[cfg(target_os = "macos")]
                     ui.add_space(TRAFFIC_LIGHT_PAD);
 
-                    // Brand word-mark
                     ui.label(
                         RichText::new("Mail Man")
                             .strong()
@@ -37,16 +30,14 @@ impl MailmanApp {
                             .color(theme::ACCENT),
                     );
 
-                    // Thin divider
                     ui.separator();
 
-                    // Import sub-menu
-                    ui.menu_button(RichText::new("Import").size(13.0), |ui| {
-                        if ui.button("From Postman…").clicked() {
+                    let import_mr = ui.menu_button(RichText::new("Import").size(13.0), |ui| {
+                        if ui.button("From Postman…").cursor_hand().clicked() {
                             self.show_postman_import_dialog = true;
                             ui.close();
                         }
-                        if ui.button("From Bundle…").clicked() {
+                        if ui.button("From Bundle…").cursor_hand().clicked() {
                             if let Some(path) = rfd::FileDialog::new()
                                 .set_title("Import Mail Man Bundle")
                                 .add_filter(
@@ -62,10 +53,11 @@ impl MailmanApp {
                             ui.close();
                         }
                     });
+                    import_mr.response.cursor_hand();
 
-                    // Export
                     if ui
                         .button(RichText::new("Export Bundle").size(13.0))
+                        .cursor_hand()
                         .clicked()
                     {
                         self.show_export_bundle_dialog = true;
@@ -73,11 +65,11 @@ impl MailmanApp {
                         self.export_bundle_password_confirm.clear();
                     }
 
-                    // Environment switcher — right-aligned
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !self.show_environment_panel
                             && ui
                                 .button(RichText::new("Env Settings").size(13.0))
+                                .cursor_hand()
                                 .clicked()
                         {
                             self.show_environment_panel = true;
@@ -100,12 +92,18 @@ impl MailmanApp {
                                 for env in &self.environments {
                                     let selected = self.selected_environment_id.as_deref()
                                         == Some(env.id.as_str());
-                                    if ui.selectable_label(selected, &env.name).clicked() {
+                                    if ui
+                                        .selectable_label(selected, &env.name)
+                                        .cursor_hand()
+                                        .clicked()
+                                    {
                                         self.selected_environment_id = Some(env.id.clone());
                                         selection_changed = true;
                                     }
                                 }
-                            });
+                            })
+                            .response
+                            .cursor_hand();
                         if selection_changed {
                             self.mark_dirty();
                         }

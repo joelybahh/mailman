@@ -5,7 +5,7 @@ use eframe::egui::{self, RichText, TextEdit};
 use crate::app::MailmanApp;
 use crate::domain::non_empty_trimmed;
 
-use super::shared::attach_text_context_menu;
+use super::shared::{attach_text_context_menu, HandCursor};
 use super::theme;
 
 impl MailmanApp {
@@ -57,7 +57,7 @@ impl MailmanApp {
                 ui.add_space(10.0);
 
                 ui.horizontal(|ui| {
-                    if ui.button("Export").clicked() {
+                    if ui.button("Export").cursor_hand().clicked() {
                         let password = self.export_bundle_password.trim().to_owned();
                         let confirm = self.export_bundle_password_confirm.trim().to_owned();
 
@@ -100,7 +100,7 @@ impl MailmanApp {
                         }
                     }
 
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Cancel").cursor_hand().clicked() {
                         should_close = true;
                     }
                 });
@@ -148,7 +148,7 @@ impl MailmanApp {
                 ui.add_space(10.0);
 
                 ui.horizontal(|ui| {
-                    if ui.button("Import").clicked() {
+                    if ui.button("Import").cursor_hand().clicked() {
                         let Some(path) = selected_path.as_ref() else {
                             self.status_line = "Select a bundle file first.".to_owned();
                             return;
@@ -174,7 +174,7 @@ impl MailmanApp {
                         }
                     }
 
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Cancel").cursor_hand().clicked() {
                         should_close = true;
                     }
                 });
@@ -234,7 +234,7 @@ impl MailmanApp {
                             .hint_text("/path/to/Postman"),
                     );
                     attach_text_context_menu(&response, &self.postman_import_path, true);
-                    if ui.button("Browse").clicked() {
+                    if ui.button("Browse").cursor_hand().clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .set_title("Select Postman Directory")
                             .pick_folder()
@@ -246,7 +246,7 @@ impl MailmanApp {
                 ui.add_space(10.0);
 
                 ui.horizontal(|ui| {
-                    if ui.button("Auto Detect").clicked() {
+                    if ui.button("Auto Detect").cursor_hand().clicked() {
                         let workspace_filter =
                             non_empty_trimmed(&self.postman_workspace_filter).map(str::to_owned);
                         let summary =
@@ -255,7 +255,7 @@ impl MailmanApp {
                         should_close = true;
                     }
 
-                    if ui.button("Import from Path").clicked() {
+                    if ui.button("Import from Path").cursor_hand().clicked() {
                         let raw_path = self.postman_import_path.trim();
                         if raw_path.is_empty() {
                             self.status_line = "Enter a Postman path first.".to_owned();
@@ -271,7 +271,7 @@ impl MailmanApp {
                         should_close = true;
                     }
 
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Cancel").cursor_hand().clicked() {
                         should_close = true;
                     }
                 });

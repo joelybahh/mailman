@@ -2,7 +2,7 @@ use eframe::egui::{self, RichText, TextEdit};
 
 use crate::app::{MailmanApp, ResponseViewTab};
 
-use super::shared::{attach_text_context_menu, render_json_tree};
+use super::shared::{attach_text_context_menu, render_json_tree, HandCursor};
 use super::theme;
 
 impl MailmanApp {
@@ -55,12 +55,14 @@ impl MailmanApp {
                 });
 
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.response_view_tab, ResponseViewTab::Raw, "Raw");
+                    ui.selectable_value(&mut self.response_view_tab, ResponseViewTab::Raw, "Raw")
+                        .cursor_hand();
                     ui.selectable_value(
                         &mut self.response_view_tab,
                         ResponseViewTab::Pretty,
                         "Pretty",
-                    );
+                    )
+                    .cursor_hand();
                 });
                 ui.separator();
 

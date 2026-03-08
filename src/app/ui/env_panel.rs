@@ -3,7 +3,7 @@ use eframe::egui::{self, RichText, TextEdit};
 use crate::app::MailmanApp;
 use crate::models::KeyValue;
 
-use super::shared::attach_text_context_menu;
+use super::shared::{attach_text_context_menu, HandCursor};
 use super::theme;
 
 impl MailmanApp {
@@ -16,7 +16,7 @@ impl MailmanApp {
                 ui.horizontal(|ui| {
                     ui.heading("Environments");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Close").clicked() {
+                        if ui.button("Close").cursor_hand().clicked() {
                             self.show_environment_panel = false;
                         }
                     });
@@ -35,7 +35,7 @@ impl MailmanApp {
                             .hint_text("new env (qa, prod)"),
                     );
                     attach_text_context_menu(&response, &self.new_environment_name, true);
-                    if ui.button("Add").clicked() {
+                    if ui.button("Add").cursor_hand().clicked() {
                         let name = self.new_environment_name.trim().to_owned();
                         if !name.is_empty() {
                             self.add_environment(name);
@@ -44,6 +44,7 @@ impl MailmanApp {
                     }
                     if ui
                         .button(RichText::new("Delete").color(theme::MUTED))
+                        .cursor_hand()
                         .clicked()
                     {
                         self.delete_selected_environment();
@@ -121,6 +122,7 @@ impl MailmanApp {
                                 }
                                 if ui
                                     .add_sized([remove_width, 0.0], egui::Button::new("×"))
+                                    .cursor_hand()
                                     .clicked()
                                 {
                                     remove_index = Some(variable_index);
@@ -134,7 +136,7 @@ impl MailmanApp {
                         }
 
                         ui.add_space(4.0);
-                        if ui.button("+ Add Variable").clicked() {
+                        if ui.button("+ Add Variable").cursor_hand().clicked() {
                             env.variables.push(KeyValue::default());
                             changed = true;
                         }
