@@ -110,6 +110,10 @@ pub(crate) struct MailmanApp {
     /// Number of script rules that successfully ran against the last response.
     /// Reset to 0 on each new request.
     pub(in crate::app) scripts_ran: usize,
+    /// The environment ID that was active when the current request was sent.
+    /// Scripts always write to this environment, regardless of any mid-flight
+    /// environment switch in the toolbar.
+    pub(in crate::app) inflight_environment_id: Option<String>,
 }
 
 impl MailmanApp {
@@ -188,6 +192,7 @@ impl MailmanApp {
             logo_texture: None,
             expand_to_selection: true,
             scripts_ran: 0,
+            inflight_environment_id: None,
         };
 
         app.try_auto_session_unlock();
@@ -200,9 +205,22 @@ impl MailmanApp {
     }
 
     pub(in crate::app) fn lock_workspace(&mut self) {
-        // Wipe the key from memory.
+        // Wipe the key and decrypted environments from memory.
         self.key_material = None;
         self.environments.clear();
+
+        // Drop the in-flight request channel so the worker response is never
+        // consumed after locking. This prevents a pre-lock response (and any
+        // scripts it would trigger) from mutating state in the next session.
+        self.response_rx = None;
+        self.in_flight = false;
+        self.response = ResponseState::default();
+        self.response_body_view.clear();
+        self.response_raw_chunks.clear();
+        self.parsed_response_json = None;
+        self.parsed_response_json_error = None;
+        self.scripts_ran = 0;
+        self.inflight_environment_id = None;
 
         // Remove the cached session key from the OS keychain and clear the
         // recorded expiry so the user must unlock again.
@@ -588,6 +606,7 @@ impl MailmanApp {
 
         self.in_flight = true;
         self.scripts_ran = 0;
+        self.inflight_environment_id = self.selected_environment_id.clone();
         self.response.clear_for_request();
         self.response_body_view.clear();
         self.response_raw_chunks.clear();
@@ -728,7 +747,12 @@ impl MailmanApp {
             return;
         };
 
-        let Some(env_idx) = self.selected_environment_index() else { return };
+        // Resolve against the environment that was active at send time, not
+        // the current selection — the user may have switched mid-flight.
+        let Some(target_id) = self.inflight_environment_id.clone() else { return };
+        let Some(env_idx) = self.environments.iter().position(|e| e.id == target_id) else {
+            return;
+        };
 
         let mut ran = 0usize;
         for script in &scripts {
