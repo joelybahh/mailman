@@ -5,7 +5,7 @@
 ### UI Rebrand & Visual Polish
 
 - **macOS native title bar** — content now extends into the macOS title bar area (`fullsize_content_view`). The toolbar sits flush beside the traffic-light buttons exactly like a native Mac app; window title is hidden.
-- **"Mail Man" wordmark** — the toolbar now renders the app name in the brand accent orange rather than a plain system title.
+- **"Mailman" wordmark** — the toolbar now renders the app name in the brand accent orange rather than a plain system title.
 - **Accent-orange Send CTA** — the Send button uses the same warm orange as the logo/login screen, making the primary action immediately obvious.
 - **Method + URL + Send as a single hero row** — collapsed from a multi-row layout into one compact, prominent action bar at the top of the request editor.
 - **Request name as an editable heading** — the selected request's name is shown as a large (18pt) frameless inline text field at the top, so renaming is just a click away.

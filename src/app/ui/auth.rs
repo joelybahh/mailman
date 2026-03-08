@@ -61,7 +61,21 @@ impl MailmanApp {
                                 );
                             }
                             ui.add_space(10.0);
-                            ui.label(RichText::new("Mail Man").size(22.0).strong());
+                            {
+                                let font = egui::FontId::proportional(22.0);
+                                let mut job = egui::text::LayoutJob::default();
+                                job.append("Mail", 0.0, egui::text::TextFormat {
+                                    font_id: font.clone(),
+                                    color: ui.visuals().strong_text_color(),
+                                    ..Default::default()
+                                });
+                                job.append("man", 0.0, egui::text::TextFormat {
+                                    font_id: font,
+                                    color: ui.visuals().text_color(),
+                                    ..Default::default()
+                                });
+                                ui.label(job);
+                            }
                             ui.add_space(3.0);
                             ui.label(
                                 RichText::new("Offline-first API client")

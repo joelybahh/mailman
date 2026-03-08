@@ -73,10 +73,10 @@ impl MailmanApp {
                         }
 
                         let save_target = rfd::FileDialog::new()
-                            .set_title("Export Mail Man Bundle")
+                            .set_title("Export Mailman Bundle")
                             .set_file_name("mailman-workspace.mmbundle")
                             .add_filter(
-                                "Mail Man Bundle",
+                                "Mailman Bundle",
                                 &["mmbundle", "mailmanbundle"],
                             )
                             .save_file();

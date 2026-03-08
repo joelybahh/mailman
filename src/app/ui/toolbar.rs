@@ -23,12 +23,11 @@ impl MailmanApp {
                     #[cfg(target_os = "macos")]
                     ui.add_space(TRAFFIC_LIGHT_PAD);
 
-                    ui.label(
-                        RichText::new("Mail Man")
-                            .strong()
-                            .size(15.0)
-                            .color(theme::ACCENT),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(RichText::new("Mail").strong().size(15.0));
+                        ui.label(RichText::new("man").size(15.0));
+                    });
 
                     ui.separator();
 
@@ -39,9 +38,9 @@ impl MailmanApp {
                         }
                         if ui.button("From Bundle…").cursor_hand().clicked() {
                             if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Import Mail Man Bundle")
+                                .set_title("Import Mailman Bundle")
                                 .add_filter(
-                                    "Mail Man Bundle",
+                                    "Mailman Bundle",
                                     &["mmbundle", "mailmanbundle", "json"],
                                 )
                                 .pick_file()

@@ -20,7 +20,7 @@ fn main() -> eframe::Result<()> {
         // toolbar sits next to the traffic-light buttons (Xcode / Arc style).
         // with_titlebar_shown(false) = transparent titlebar (content shows through)
         // with_fullsize_content_view(true) = content rect fills the whole window
-        // with_title_shown(false) = no "Mail Man" text in the title bar
+        // with_title_shown(false) = no "Mailman" text in the title bar
         viewport = viewport
             .with_titlebar_shown(false)
             .with_fullsize_content_view(true)
@@ -46,7 +46,7 @@ fn main() -> eframe::Result<()> {
     native_options.viewport = viewport;
 
     eframe::run_native(
-        "Mail Man",
+        "Mailman",
         native_options,
         Box::new(|_cc| Ok(Box::new(MailmanApp::new()))),
     )

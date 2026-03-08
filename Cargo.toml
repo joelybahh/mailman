@@ -20,11 +20,11 @@ serde_json = "1.0.135"
 walkdir = "2.5.0"
 
 [package.metadata.packager]
-product-name = "Mail Man"
+product-name = "Mailman"
 identifier = "com.mailman.mailman"
 category = "DeveloperTool"
 description = "A lightweight, offline-first API client."
-long-description = "Mail Man is a lightweight, offline-first API client for local request workflows."
+long-description = "Mailman is a lightweight, offline-first API client for local request workflows."
 before-packaging-command = "cargo build --release"
 formats = ["app", "dmg", "deb", "wix", "nsis"]
 out-dir = "dist/packager"
