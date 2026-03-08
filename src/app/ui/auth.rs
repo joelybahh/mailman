@@ -36,24 +36,21 @@ impl MailmanApp {
             );
 
             ui.scope_builder(egui::UiBuilder::new().max_rect(card_slot), |ui| {
-                // Drop shadow painted before the card
-                let shadow = card_slot
-                    .expand2(egui::vec2(6.0, 4.0))
-                    .translate(egui::vec2(0.0, 4.0));
-                ui.painter().rect_filled(
-                    shadow,
-                    egui::CornerRadius::same(14),
-                    Color32::from_black_alpha(28),
-                );
-
                 let frame_resp = egui::Frame::default()
                     .inner_margin(egui::Margin::same(28))
-                    .corner_radius(egui::CornerRadius::same(12))
+                    // Flat top so the accent strip above sits flush; only bottom corners rounded
+                    .corner_radius(egui::CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 })
                     .fill(ui.visuals().faint_bg_color)
                     .stroke(egui::Stroke::new(
                         1.0,
                         ui.visuals().widgets.noninteractive.bg_stroke.color,
                     ))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 6],
+                        blur: 18,
+                        spread: 0,
+                        color: Color32::from_black_alpha(50),
+                    })
                     .show(ui, |ui| {
                         // Branding block
                         ui.vertical_centered(|ui| {
@@ -163,11 +160,11 @@ impl MailmanApp {
                         }
                     });
 
-                // Accent bar painted on top of the card border
+                // Accent bar painted on top of the card — rounded top matches the strip shape
                 let card_rect = frame_resp.response.rect;
                 ui.painter().rect_filled(
                     egui::Rect::from_min_size(card_rect.min, egui::vec2(card_rect.width(), 5.0)),
-                    egui::CornerRadius { nw: 12, ne: 12, sw: 0, se: 0 },
+                    egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 },
                     theme::ACCENT,
                 );
 
