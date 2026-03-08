@@ -141,7 +141,7 @@ impl MailmanApp {
             response_body_view: String::new(),
             parsed_response_json: None,
             parsed_response_json_error: None,
-            response_view_tab: ResponseViewTab::Raw,
+            response_view_tab: ResponseViewTab::Pretty,
             status_line,
             dirty: false,
             last_mutation: Instant::now(),

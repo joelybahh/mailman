@@ -96,6 +96,14 @@ pub(in crate::app) fn render_json_leaf(
     value_color: Color32,
 ) {
     let rendered_text = value_text.into();
+    // Strip surrounding double-quotes for clipboard so copying a JSON string
+    // value like `"Gold"` puts `Gold` on the clipboard, not `"Gold"`.
+    let copy_text = if rendered_text.starts_with('"') && rendered_text.ends_with('"') && rendered_text.len() >= 2 {
+        rendered_text[1..rendered_text.len() - 1].to_owned()
+    } else {
+        rendered_text.clone()
+    };
+
     ui.horizontal_wrapped(|ui| {
         if let Some(key) = key {
             ui.label(RichText::new(key).strong().color(theme::MUTED));
@@ -111,11 +119,11 @@ pub(in crate::app) fn render_json_leaf(
         );
 
         if response.double_clicked() {
-            ui.ctx().copy_text(rendered_text.clone());
+            ui.ctx().copy_text(copy_text.clone());
         }
         response.context_menu(|ui| {
             if ui.button("Copy Value").clicked() {
-                ui.ctx().copy_text(rendered_text.clone());
+                ui.ctx().copy_text(copy_text.clone());
                 ui.close();
             }
             if ui.button("Copy JSON Path").clicked() {
@@ -126,6 +134,54 @@ pub(in crate::app) fn render_json_leaf(
     });
 }
 
+/// Build a compact single-line preview of an object or array value, truncated
+/// at `max_chars` with a trailing `…` when needed. Used as the suffix in
+/// collapsing header labels so the user gets an at-a-glance sense of the
+/// contents without expanding.
+fn json_preview(value: &serde_json::Value, max_chars: usize) -> String {
+    let preview = match value {
+        serde_json::Value::Object(map) => {
+            let pairs: Vec<String> = map
+                .iter()
+                .map(|(k, v)| {
+                    let v_str = match v {
+                        serde_json::Value::String(s) => format!("\"{s}\""),
+                        serde_json::Value::Null => "null".to_owned(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Object(m) => format!("{{…{}}}", m.len()),
+                        serde_json::Value::Array(a) => format!("[…{}]", a.len()),
+                    };
+                    format!("\"{k}\": {v_str}")
+                })
+                .collect();
+            format!("{{ {} }}", pairs.join(", "))
+        }
+        serde_json::Value::Array(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => format!("\"{s}\""),
+                    serde_json::Value::Null => "null".to_owned(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Object(m) => format!("{{…{}}}", m.len()),
+                    serde_json::Value::Array(a) => format!("[…{}]", a.len()),
+                })
+                .collect();
+            format!("[{}]", parts.join(", "))
+        }
+        _ => return String::new(),
+    };
+
+    if preview.chars().count() <= max_chars {
+        preview
+    } else {
+        let truncated: String = preview.chars().take(max_chars).collect();
+        format!("{truncated}…")
+    }
+}
+
 pub(in crate::app) fn render_json_tree(
     ui: &mut egui::Ui,
     key: Option<&str>,
@@ -134,9 +190,19 @@ pub(in crate::app) fn render_json_tree(
 ) {
     match value {
         serde_json::Value::Object(map) => {
-            let label = match key {
-                Some(key) => format!("{key}: {{}} {}", map.len()),
-                None => format!("{{}} {}", map.len()),
+            // At the root level show just the key count; for nested objects
+            // (e.g. array items) show a truncated inline preview instead.
+            let label = if path == "$" {
+                match key {
+                    Some(k) => format!("{k}: {{}} {}", map.len()),
+                    None => format!("{{}} {}", map.len()),
+                }
+            } else {
+                let preview = json_preview(value, 80);
+                match key {
+                    Some(k) => format!("{k}: {preview}"),
+                    None => preview,
+                }
             };
             egui::CollapsingHeader::new(label)
                 .id_salt(path)
@@ -149,9 +215,17 @@ pub(in crate::app) fn render_json_tree(
                 });
         }
         serde_json::Value::Array(items) => {
-            let label = match key {
-                Some(key) => format!("{key}: [] {}", items.len()),
-                None => format!("[] {}", items.len()),
+            let label = if path == "$" {
+                match key {
+                    Some(k) => format!("{k}: [] {}", items.len()),
+                    None => format!("[] {}", items.len()),
+                }
+            } else {
+                let preview = json_preview(value, 80);
+                match key {
+                    Some(k) => format!("{k}: {preview}"),
+                    None => preview,
+                }
             };
             egui::CollapsingHeader::new(label)
                 .id_salt(path)
