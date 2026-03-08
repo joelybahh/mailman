@@ -54,6 +54,18 @@ pub(crate) struct KeyValue {
     pub(crate) value: String,
 }
 
+/// A single post-response script rule: extract a value from the JSON response
+/// body and write it into an environment variable.
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+pub(crate) struct ResponseScript {
+    /// Dot-notation path into the JSON body, e.g. `access_token` or `data.token`.
+    #[serde(default)]
+    pub(crate) extract_key: String,
+    /// Name of the environment variable to override, e.g. `token`.
+    #[serde(default)]
+    pub(crate) env_var: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Endpoint {
     pub(crate) id: String,
@@ -76,6 +88,10 @@ pub(crate) struct Endpoint {
     #[serde(default = "default_endpoint_body_mode")]
     pub(crate) body_mode: String,
     pub(crate) body: String,
+    /// Rules executed after a 2xx response to extract values from the JSON
+    /// body and write them into environment variables.
+    #[serde(default)]
+    pub(crate) scripts: Vec<ResponseScript>,
 }
 
 impl Endpoint {
@@ -94,6 +110,7 @@ impl Endpoint {
             headers: vec![],
             body_mode: "none".to_owned(),
             body: String::new(),
+            scripts: vec![],
         }
     }
 }

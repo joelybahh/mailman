@@ -1052,6 +1052,7 @@ fn endpoint_from_requester_log_object(
         headers: request_headers_from_data(object),
         body_mode: request_body_mode_from_data(object),
         body: request_body_from_data(object),
+        scripts: vec![],
     })
 }
 
@@ -1321,6 +1322,7 @@ pub(crate) fn endpoint_from_cache_object(
         headers: request_headers_from_data(data),
         body_mode: request_body_mode_from_data(data),
         body: request_body_from_data(data),
+        scripts: vec![],
     })
 }
 
@@ -2600,6 +2602,7 @@ fn endpoint_from_postman_request(
         headers,
         body_mode,
         body,
+        scripts: vec![],
     })
 }
 

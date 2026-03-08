@@ -33,6 +33,7 @@ pub(crate) fn default_endpoints() -> Vec<Endpoint> {
             }],
             body_mode: "raw".to_owned(),
             body: "{\n  \"email\": \"${email}\",\n  \"password\": \"${password}\"\n}".to_owned(),
+            scripts: vec![],
         },
     ]
 }

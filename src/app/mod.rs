@@ -37,6 +37,7 @@ pub(in crate::app) enum RequestEditorTab {
     Params,
     Headers,
     Body,
+    Scripts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +98,9 @@ pub(crate) struct MailmanApp {
     /// collection/folder containing the selected endpoint on first render,
     /// then resets it to `false`.
     pub(in crate::app) expand_to_selection: bool,
+    /// Number of script rules that successfully ran against the last response.
+    /// Reset to 0 on each new request.
+    pub(in crate::app) scripts_ran: usize,
 }
 
 impl MailmanApp {
@@ -172,6 +176,7 @@ impl MailmanApp {
             request_editor_tab: RequestEditorTab::Params,
             logo_texture: None,
             expand_to_selection: true,
+            scripts_ran: 0,
         };
 
         app.try_auto_session_unlock();
@@ -502,6 +507,7 @@ impl MailmanApp {
             headers: vec![],
             body_mode: "none".to_owned(),
             body: String::new(),
+            scripts: vec![],
         });
         self.set_selected_endpoint(Some(id));
         self.mark_dirty();
@@ -575,6 +581,7 @@ impl MailmanApp {
         let (tx, rx) = mpsc::channel();
 
         self.in_flight = true;
+        self.scripts_ran = 0;
         self.response.clear_for_request();
         self.response_body_view.clear();
         self.response_raw_chunks.clear();
@@ -613,6 +620,7 @@ impl MailmanApp {
                 self.response_body_view = self.response.body.clone();
                 self.response_raw_chunks = chunk_response_body(&self.response_body_view);
                 self.update_parsed_response_json();
+                self.run_response_scripts();
                 self.in_flight = false;
                 self.response_rx = None;
             }
@@ -646,6 +654,46 @@ impl MailmanApp {
                 self.parsed_response_json = None;
                 self.parsed_response_json_error = Some(err.to_string());
             }
+        }
+    }
+
+    pub(in crate::app) fn run_response_scripts(&mut self) {
+        // Only fire on 2xx responses.
+        let Some(status) = self.response.status_code else { return };
+        if !(200..300).contains(&status) { return }
+
+        let scripts = self
+            .selected_endpoint_index()
+            .map(|i| self.endpoints[i].scripts.clone())
+            .unwrap_or_default();
+        if scripts.is_empty() { return }
+
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&self.response.body) else {
+            return;
+        };
+
+        let Some(env_idx) = self.selected_environment_index() else { return };
+
+        let mut ran = 0usize;
+        for script in &scripts {
+            let path = script.extract_key.trim();
+            let var  = script.env_var.trim();
+            if path.is_empty() || var.is_empty() { continue }
+
+            let Some(extracted) = json_path_extract(&json, path) else { continue };
+
+            let env = &mut self.environments[env_idx];
+            if let Some(kv) = env.variables.iter_mut().find(|kv| kv.key == var) {
+                kv.value = extracted;
+            } else {
+                env.variables.push(KeyValue { key: var.to_owned(), value: extracted });
+            }
+            ran += 1;
+        }
+
+        if ran > 0 {
+            self.scripts_ran = ran;
+            self.mark_dirty();
         }
     }
 
@@ -953,4 +1001,24 @@ fn find_chunk_split(s: &str, target: usize) -> usize {
         i -= 1;
     }
     i.max(1)
+}
+
+/// Walk a dot-notation path (e.g. `"data.access_token"` or `"items.0.id"`)
+/// into a `serde_json::Value` and return the leaf as a plain string.
+fn json_path_extract(json: &serde_json::Value, path: &str) -> Option<String> {
+    let mut current = json;
+    for segment in path.split('.') {
+        current = if let Ok(idx) = segment.parse::<usize>() {
+            current.get(idx)?
+        } else {
+            current.get(segment)?
+        };
+    }
+    Some(match current {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b)   => b.to_string(),
+        serde_json::Value::Null      => "null".to_owned(),
+        other                        => other.to_string(),
+    })
 }
