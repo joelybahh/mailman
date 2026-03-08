@@ -29,6 +29,26 @@ impl MailmanApp {
                         ui.label(RichText::new("man").size(15.0));
                     });
 
+                    {
+                        let version_text = concat!("v", env!("CARGO_PKG_VERSION"));
+                        let galley = ui.painter().layout_no_wrap(
+                            version_text.to_owned(),
+                            egui::FontId::proportional(10.5),
+                            Color32::from_gray(160),
+                        );
+                        let padding = egui::vec2(7.0, 3.0);
+                        let chip_size = galley.size() + padding * 2.0;
+                        let (rect, _) = ui.allocate_exact_size(chip_size, egui::Sense::hover());
+                        if ui.is_rect_visible(rect) {
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::CornerRadius::same(9),
+                                Color32::from_gray(45),
+                            );
+                            ui.painter().galley(rect.min + padding, galley, Color32::from_gray(160));
+                        }
+                    }
+
                     ui.separator();
 
                     let import_mr = ui.menu_button(RichText::new("Import").size(13.0), |ui| {
