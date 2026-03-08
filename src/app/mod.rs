@@ -3,19 +3,20 @@ pub(crate) mod ui;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 
 use crate::domain::{
-    ImportScanResult, ImportSummary, ImportedEnvironment, build_curl_command, create_id,
-    create_security_metadata, default_endpoints, default_environment_index, default_environments,
-    default_postman_directories, deserialize_workspace_bundle, endpoint_dedup_key, execute_request,
-    merge_endpoint_details, normalize_endpoint_url_and_query_params,
-    normalize_folder_path, resolve_folder_path_from_lookup,
-    scan_postman_directory, serialize_workspace_bundle, verify_password,
+    ImportScanResult, ImportSummary, ImportedEnvironment, build_curl_command, clear_session_key,
+    create_id, create_security_metadata, default_endpoints, default_environment_index,
+    default_environments, default_postman_directories, deserialize_workspace_bundle,
+    endpoint_dedup_key, execute_request, load_session_key, merge_endpoint_details,
+    normalize_endpoint_url_and_query_params, normalize_folder_path,
+    resolve_folder_path_from_lookup, save_session_key, scan_postman_directory,
+    serialize_workspace_bundle, verify_password,
 };
 use crate::models::{
     AppConfig, Endpoint, Environment, EnvironmentIndexEntry, KeyMaterial, KeyValue, ResponseState,
@@ -23,6 +24,12 @@ use crate::models::{
 };
 use crate::request_body::normalize_body_mode_owned;
 use crate::storage::{AppStorage, CoreData};
+
+pub(in crate::app) enum AuthResult {
+    SetupOk { metadata: SecurityMetadata, key: KeyMaterial },
+    UnlockOk(KeyMaterial),
+    Err(String),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::app) enum AppPhase {
@@ -36,6 +43,7 @@ pub(in crate::app) enum RequestEditorTab {
     Params,
     Headers,
     Body,
+    Scripts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +86,9 @@ pub(crate) struct MailmanApp {
     pub(in crate::app) in_flight: bool,
     pub(in crate::app) response_rx: Option<Receiver<ResponseState>>,
 
+    pub(in crate::app) auth_pending: bool,
+    pub(in crate::app) auth_rx: Option<Receiver<AuthResult>>,
+
     pub(in crate::app) new_environment_name: String,
     pub(in crate::app) postman_import_path: String,
     pub(in crate::app) postman_workspace_filter: String,
@@ -92,6 +103,17 @@ pub(crate) struct MailmanApp {
     pub(in crate::app) import_bundle_password: String,
     pub(in crate::app) request_editor_tab: RequestEditorTab,
     pub(in crate::app) logo_texture: Option<egui::TextureHandle>,
+    /// Set to `true` on startup; the sidebar uses it to auto-expand the
+    /// collection/folder containing the selected endpoint on first render,
+    /// then resets it to `false`.
+    pub(in crate::app) expand_to_selection: bool,
+    /// Number of script rules that successfully ran against the last response.
+    /// Reset to 0 on each new request.
+    pub(in crate::app) scripts_ran: usize,
+    /// The environment ID that was active when the current request was sent.
+    /// Scripts always write to this environment, regardless of any mid-flight
+    /// environment switch in the toolbar.
+    pub(in crate::app) inflight_environment_id: Option<String>,
 }
 
 impl MailmanApp {
@@ -126,7 +148,7 @@ impl MailmanApp {
             AppPhase::SetupPassword
         };
 
-        Self {
+        let mut app = Self {
             storage,
             phase,
             security_metadata,
@@ -152,6 +174,8 @@ impl MailmanApp {
             last_mutation: Instant::now(),
             in_flight: false,
             response_rx: None,
+            auth_pending: false,
+            auth_rx: None,
             new_environment_name: String::new(),
             postman_import_path: String::new(),
             postman_workspace_filter: String::new(),
@@ -166,12 +190,45 @@ impl MailmanApp {
             import_bundle_password: String::new(),
             request_editor_tab: RequestEditorTab::Params,
             logo_texture: None,
-        }
+            expand_to_selection: true,
+            scripts_ran: 0,
+            inflight_environment_id: None,
+        };
+
+        app.try_auto_session_unlock();
+        app
     }
 
     pub(in crate::app) fn mark_dirty(&mut self) {
         self.dirty = true;
         self.last_mutation = Instant::now();
+    }
+
+    pub(in crate::app) fn lock_workspace(&mut self) {
+        // Wipe the key and decrypted environments from memory.
+        self.key_material = None;
+        self.environments.clear();
+
+        // Drop the in-flight request channel so the worker response is never
+        // consumed after locking. This prevents a pre-lock response (and any
+        // scripts it would trigger) from mutating state in the next session.
+        self.response_rx = None;
+        self.in_flight = false;
+        self.response = ResponseState::default();
+        self.response_body_view.clear();
+        self.response_raw_chunks.clear();
+        self.parsed_response_json = None;
+        self.parsed_response_json_error = None;
+        self.scripts_ran = 0;
+        self.inflight_environment_id = None;
+
+        // Remove the cached session key from the OS keychain and clear the
+        // recorded expiry so the user must unlock again.
+        clear_session_key();
+        self.config.session_expires_at = None;
+        let _ = self.storage.save_config(&self.config);
+
+        self.phase = AppPhase::UnlockPassword;
     }
 
     pub(in crate::app) fn sync_window_resolution(&mut self, ctx: &egui::Context) {
@@ -292,6 +349,10 @@ impl MailmanApp {
     }
 
     pub(in crate::app) fn handle_setup_password_submission(&mut self) {
+        if self.auth_pending {
+            return;
+        }
+
         let password = self.setup_password.clone();
         let confirm = self.setup_password_confirm.clone();
 
@@ -304,54 +365,45 @@ impl MailmanApp {
             return;
         }
 
-        let (metadata, key) = match create_security_metadata(&password) {
-            Ok(result) => result,
-            Err(err) => {
-                self.auth_message = format!("Failed to configure encryption: {err}");
-                return;
-            }
-        };
+        let (tx, rx): (Sender<AuthResult>, Receiver<AuthResult>) = mpsc::channel();
 
-        if let Err(err) = self.storage.save_security_metadata(&metadata) {
-            self.auth_message = format!("Failed to persist security metadata: {err}");
-            return;
-        }
-
-        self.security_metadata = Some(metadata);
-        self.setup_password.clear();
-        self.setup_password_confirm.clear();
-
-        if let Err(err) = self.complete_unlock(key) {
-            self.auth_message = err;
-            return;
-        }
-
+        self.auth_pending = true;
+        self.auth_rx = Some(rx);
         self.auth_message = String::new();
-        self.phase = AppPhase::Ready;
+
+        thread::spawn(move || {
+            let result = match create_security_metadata(&password) {
+                Ok((metadata, key)) => AuthResult::SetupOk { metadata, key },
+                Err(err) => AuthResult::Err(format!("Failed to configure encryption: {err}")),
+            };
+            let _ = tx.send(result);
+        });
     }
 
     pub(in crate::app) fn handle_unlock_password_submission(&mut self) {
-        let Some(metadata) = self.security_metadata.as_ref() else {
+        if self.auth_pending {
+            return;
+        }
+
+        let Some(metadata) = self.security_metadata.clone() else {
             self.auth_message = "Missing security metadata; restart app.".to_owned();
             return;
         };
 
-        let key = match verify_password(&self.unlock_password, metadata) {
-            Ok(key) => key,
-            Err(err) => {
-                self.auth_message = format!("Invalid password: {err}");
-                return;
-            }
-        };
+        let password = self.unlock_password.clone();
+        let (tx, rx): (Sender<AuthResult>, Receiver<AuthResult>) = mpsc::channel();
 
-        self.unlock_password.clear();
-        if let Err(err) = self.complete_unlock(key) {
-            self.auth_message = err;
-            return;
-        }
-
+        self.auth_pending = true;
+        self.auth_rx = Some(rx);
         self.auth_message = String::new();
-        self.phase = AppPhase::Ready;
+
+        thread::spawn(move || {
+            let result = match verify_password(&password, &metadata) {
+                Ok(key) => AuthResult::UnlockOk(key),
+                Err(err) => AuthResult::Err(format!("Invalid password: {err}")),
+            };
+            let _ = tx.send(result);
+        });
     }
 
     fn complete_unlock(&mut self, key: KeyMaterial) -> Result<(), String> {
@@ -388,7 +440,79 @@ impl MailmanApp {
             }
         }
 
+        // Save or clear the session key in the OS keychain based on the user's
+        // current session-duration preference.
+        match self.config.session_duration_days {
+            None => {
+                // "Always ask" — remove any previously cached key.
+                clear_session_key();
+                self.config.session_expires_at = None;
+            }
+            Some(duration_days) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let expires_at = if duration_days == 0 {
+                    u64::MAX // forever
+                } else {
+                    now.saturating_add(duration_days as u64 * 86_400)
+                };
+                if let Err(err) = save_session_key(&key) {
+                    eprintln!("Failed to save session key to keychain: {err}");
+                } else {
+                    self.config.session_expires_at = Some(expires_at);
+                    let _ = self.storage.save_config(&self.config);
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Called once during `new()`. If a valid, unexpired session key exists in
+    /// the OS keychain, unlock the workspace automatically so the user skips the
+    /// password prompt.
+    fn try_auto_session_unlock(&mut self) {
+        if self.phase != AppPhase::UnlockPassword {
+            return;
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match self.config.session_expires_at {
+            None => return, // No active session recorded.
+            Some(expires_at) if expires_at != u64::MAX && expires_at < now => {
+                // Session has expired — discard it.
+                self.config.session_expires_at = None;
+                clear_session_key();
+                let _ = self.storage.save_config(&self.config);
+                return;
+            }
+            _ => {} // Valid session (forever or not yet expired).
+        }
+
+        match load_session_key() {
+            Ok(key) => {
+                if let Err(err) = self.complete_unlock(key) {
+                    // Key was stale or environments changed — fall back gracefully.
+                    eprintln!("Cached session key rejected: {err}");
+                    self.config.session_expires_at = None;
+                    clear_session_key();
+                    let _ = self.storage.save_config(&self.config);
+                } else {
+                    self.phase = AppPhase::Ready;
+                }
+            }
+            Err(_) => {
+                // Entry not in keychain (e.g. user deleted it) — clear stale metadata.
+                self.config.session_expires_at = None;
+                let _ = self.storage.save_config(&self.config);
+            }
+        }
     }
 
     pub(in crate::app) fn add_endpoint(&mut self) {
@@ -407,6 +531,7 @@ impl MailmanApp {
             headers: vec![],
             body_mode: "none".to_owned(),
             body: String::new(),
+            scripts: vec![],
         });
         self.set_selected_endpoint(Some(id));
         self.mark_dirty();
@@ -480,6 +605,8 @@ impl MailmanApp {
         let (tx, rx) = mpsc::channel();
 
         self.in_flight = true;
+        self.scripts_ran = 0;
+        self.inflight_environment_id = self.selected_environment_id.clone();
         self.response.clear_for_request();
         self.response_body_view.clear();
         self.response_raw_chunks.clear();
@@ -518,6 +645,7 @@ impl MailmanApp {
                 self.response_body_view = self.response.body.clone();
                 self.response_raw_chunks = chunk_response_body(&self.response_body_view);
                 self.update_parsed_response_json();
+                self.run_response_scripts();
                 self.in_flight = false;
                 self.response_rx = None;
             }
@@ -530,6 +658,56 @@ impl MailmanApp {
                 self.response_raw_chunks.clear();
                 self.parsed_response_json = None;
                 self.parsed_response_json_error = None;
+            }
+        }
+    }
+
+    pub(in crate::app) fn poll_auth_channel(&mut self) {
+        let Some(rx) = &self.auth_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.auth_pending = false;
+                self.auth_rx = None;
+
+                match result {
+                    AuthResult::UnlockOk(key) => {
+                        self.unlock_password.clear();
+                        if let Err(err) = self.complete_unlock(key) {
+                            self.auth_message = err;
+                            return;
+                        }
+                        self.auth_message = String::new();
+                        self.phase = AppPhase::Ready;
+                    }
+                    AuthResult::SetupOk { metadata, key } => {
+                        if let Err(err) = self.storage.save_security_metadata(&metadata) {
+                            self.auth_message =
+                                format!("Failed to persist security metadata: {err}");
+                            return;
+                        }
+                        self.security_metadata = Some(metadata);
+                        self.setup_password.clear();
+                        self.setup_password_confirm.clear();
+                        if let Err(err) = self.complete_unlock(key) {
+                            self.auth_message = err;
+                            return;
+                        }
+                        self.auth_message = String::new();
+                        self.phase = AppPhase::Ready;
+                    }
+                    AuthResult::Err(msg) => {
+                        self.auth_message = msg;
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.auth_pending = false;
+                self.auth_rx = None;
+                self.auth_message = "Authentication worker disconnected unexpectedly.".to_owned();
             }
         }
     }
@@ -551,6 +729,51 @@ impl MailmanApp {
                 self.parsed_response_json = None;
                 self.parsed_response_json_error = Some(err.to_string());
             }
+        }
+    }
+
+    pub(in crate::app) fn run_response_scripts(&mut self) {
+        // Only fire on 2xx responses.
+        let Some(status) = self.response.status_code else { return };
+        if !(200..300).contains(&status) { return }
+
+        let scripts = self
+            .selected_endpoint_index()
+            .map(|i| self.endpoints[i].scripts.clone())
+            .unwrap_or_default();
+        if scripts.is_empty() { return }
+
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&self.response.body) else {
+            return;
+        };
+
+        // Resolve against the environment that was active at send time, not
+        // the current selection — the user may have switched mid-flight.
+        let Some(target_id) = self.inflight_environment_id.clone() else { return };
+        let Some(env_idx) = self.environments.iter().position(|e| e.id == target_id) else {
+            return;
+        };
+
+        let mut ran = 0usize;
+        for script in &scripts {
+            let path = script.extract_key.trim();
+            let var  = script.env_var.trim();
+            if path.is_empty() || var.is_empty() { continue }
+
+            let Some(extracted) = json_path_extract(&json, path) else { continue };
+
+            let env = &mut self.environments[env_idx];
+            if let Some(kv) = env.variables.iter_mut().find(|kv| kv.key == var) {
+                kv.value = extracted;
+            } else {
+                env.variables.push(KeyValue { key: var.to_owned(), value: extracted });
+            }
+            ran += 1;
+        }
+
+        if ran > 0 {
+            self.scripts_ran = ran;
+            self.mark_dirty();
         }
     }
 
@@ -858,4 +1081,24 @@ fn find_chunk_split(s: &str, target: usize) -> usize {
         i -= 1;
     }
     i.max(1)
+}
+
+/// Walk a dot-notation path (e.g. `"data.access_token"` or `"items.0.id"`)
+/// into a `serde_json::Value` and return the leaf as a plain string.
+fn json_path_extract(json: &serde_json::Value, path: &str) -> Option<String> {
+    let mut current = json;
+    for segment in path.split('.') {
+        current = if let Ok(idx) = segment.parse::<usize>() {
+            current.get(idx)?
+        } else {
+            current.get(segment)?
+        };
+    }
+    Some(match current {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b)   => b.to_string(),
+        serde_json::Value::Null      => "null".to_owned(),
+        other                        => other.to_string(),
+    })
 }

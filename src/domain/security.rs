@@ -13,6 +13,47 @@ use rand::rngs::OsRng;
 
 use crate::models::*;
 
+// ── Session key helpers ────────────────────────────────────────────────────────
+//
+// The 32-byte derived KeyMaterial is stored in the OS keychain
+// (macOS Keychain / Windows Credential Manager / Linux Secret Service).
+// The env files remain encrypted at rest; this only caches the unlock key for
+// the duration the user configured, so they don't have to re-type their password
+// on every launch within that window.
+
+const KEYRING_SERVICE: &str = "com.mailman.mailman";
+const KEYRING_ACCOUNT: &str = "session-key";
+
+/// Persist the unlock key in the OS keychain.
+pub(crate) fn save_session_key(key: &KeyMaterial) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map_err(|e| e.to_string())?;
+    entry
+        .set_password(&BASE64.encode(key))
+        .map_err(|e| e.to_string())
+}
+
+/// Retrieve the previously saved unlock key from the OS keychain.
+pub(crate) fn load_session_key() -> Result<KeyMaterial, String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map_err(|e| e.to_string())?;
+    let encoded = entry.get_password().map_err(|e| e.to_string())?;
+    let bytes = BASE64.decode(encoded.as_bytes()).map_err(|e| e.to_string())?;
+    if bytes.len() != 32 {
+        return Err(format!("unexpected session key length: {}", bytes.len()));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
+/// Remove the session key from the OS keychain (best-effort; errors are ignored).
+pub(crate) fn clear_session_key() {
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT) {
+        let _ = entry.delete_password();
+    }
+}
+
 pub(crate) fn create_security_metadata(
     password: &str,
 ) -> Result<(SecurityMetadata, KeyMaterial), String> {

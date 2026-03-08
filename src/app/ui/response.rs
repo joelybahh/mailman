@@ -44,6 +44,25 @@ impl MailmanApp {
                                     .size(12.0),
                             );
                         }
+                        if self.scripts_ran > 0 {
+                            ui.add_space(4.0);
+                            egui::Frame::default()
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .fill(theme::ACCENT.gamma_multiply(0.15))
+                                .inner_margin(egui::Margin { left: 6, right: 6, top: 1, bottom: 1 })
+                                .show(ui, |ui| {
+                                    let label = if self.scripts_ran == 1 {
+                                        "1 script ran".to_owned()
+                                    } else {
+                                        format!("{} scripts ran", self.scripts_ran)
+                                    };
+                                    ui.label(
+                                        RichText::new(label)
+                                            .size(12.0)
+                                            .color(theme::ACCENT),
+                                    );
+                                });
+                        }
                     } else if !self.response.status_text.is_empty() {
                         ui.add_space(6.0);
                         ui.label(

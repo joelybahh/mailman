@@ -23,12 +23,31 @@ impl MailmanApp {
                     #[cfg(target_os = "macos")]
                     ui.add_space(TRAFFIC_LIGHT_PAD);
 
-                    ui.label(
-                        RichText::new("Mail Man")
-                            .strong()
-                            .size(15.0)
-                            .color(theme::ACCENT),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(RichText::new("Mail").strong().size(15.0));
+                        ui.label(RichText::new("man").size(15.0));
+                    });
+
+                    {
+                        let version_text = concat!("v", env!("CARGO_PKG_VERSION"));
+                        let galley = ui.painter().layout_no_wrap(
+                            version_text.to_owned(),
+                            egui::FontId::proportional(10.5),
+                            Color32::from_gray(160),
+                        );
+                        let padding = egui::vec2(7.0, 3.0);
+                        let chip_size = galley.size() + padding * 2.0;
+                        let (rect, _) = ui.allocate_exact_size(chip_size, egui::Sense::hover());
+                        if ui.is_rect_visible(rect) {
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::CornerRadius::same(9),
+                                Color32::from_gray(45),
+                            );
+                            ui.painter().galley(rect.min + padding, galley, Color32::from_gray(160));
+                        }
+                    }
 
                     ui.separator();
 
@@ -39,9 +58,9 @@ impl MailmanApp {
                         }
                         if ui.button("From Bundle…").cursor_hand().clicked() {
                             if let Some(path) = rfd::FileDialog::new()
-                                .set_title("Import Mail Man Bundle")
+                                .set_title("Import Mailman Bundle")
                                 .add_filter(
-                                    "Mail Man Bundle",
+                                    "Mailman Bundle",
                                     &["mmbundle", "mailmanbundle", "json"],
                                 )
                                 .pick_file()
@@ -66,6 +85,20 @@ impl MailmanApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("🔒 Lock").size(13.0))
+                                    .frame(false),
+                            )
+                            .on_hover_text("Lock workspace")
+                            .cursor_hand()
+                            .clicked()
+                        {
+                            self.lock_workspace();
+                        }
+
+                        ui.separator();
+
                         if !self.show_environment_panel
                             && ui
                                 .button(RichText::new("Env Settings").size(13.0))

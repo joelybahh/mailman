@@ -1,16 +1,16 @@
-# Mail Man
+# Mailman
 
 A lightweight, offline-first API client for people who want a Postman-style workflow without cloud lock-in.
 
 No account wall. No surprise workspace limits. No background sync you did not ask for.
 
-Mail Man is built for developers who just want to send requests, manage environments securely, and keep full control of local data.
+Mailman is built for developers who just want to send requests, manage environments securely, and keep full control of local data.
 
 ## Why This Exists
 
 Many developers used Postman because it was quick and easy. Over time, pricing and free-tier limits changed for some workflows.
 
-Mail Man is a simple alternative:
+Mailman is a simple alternative:
 - Free and local-first
 - Works offline
 - Stores environment variables encrypted at rest
@@ -30,7 +30,7 @@ Mail Man is a simple alternative:
 
 ## In One Line
 
-Mail Man is the practical API workbench for developers who prefer local files over cloud dashboards.
+Mailman is the practical API workbench for developers who prefer local files over cloud dashboards.
 
 ## Notable Guarantees
 
@@ -108,7 +108,7 @@ Artifacts are written to `dist/packager`.
 
 ## Data Storage
 
-Mail Man stores local app data in OS-appropriate user data directories (via `directories::ProjectDirs`).
+Mailman stores local app data in OS-appropriate user data directories (via `directories::ProjectDirs`).
 
 Stored data includes:
 - Request definitions
@@ -123,7 +123,7 @@ You can import from:
 - A custom path
 - A specific workspace name filter (optional)
 
-Mail Man attempts to merge imported data intelligently:
+Mailman attempts to merge imported data intelligently:
 - Deduplicates requests using source metadata and request identity
 - Merges missing headers/details into existing entries
 - Merges environment variables without overwriting existing keys by default
@@ -153,7 +153,7 @@ If you open an issue, include:
 
 ### Is this a Postman fork?
 
-No. Mail Man is an independent project and is not affiliated with Postman.
+No. Mailman is an independent project and is not affiliated with Postman.
 
 ### Does this replace every Postman feature?
 

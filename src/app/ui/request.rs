@@ -2,7 +2,7 @@ use eframe::egui::{self, Color32, RichText, TextEdit};
 
 use crate::app::{MailmanApp, RequestEditorTab};
 use crate::domain::{method_color, resolve_endpoint_url};
-use crate::models::{BODY_MODE_OPTIONS, KeyValue, METHOD_OPTIONS};
+use crate::models::{BODY_MODE_OPTIONS, KeyValue, METHOD_OPTIONS, ResponseScript};
 use crate::request_body::normalize_body_mode;
 
 use super::shared::{attach_text_context_menu, HandCursor};
@@ -46,6 +46,7 @@ impl MailmanApp {
                 let mut changed = false;
                 let mut remove_param_index: Option<usize> = None;
                 let mut remove_header_index: Option<usize> = None;
+                let mut remove_script_index: Option<usize> = None;
                 let mut request_editor_tab = self.request_editor_tab;
 
                 egui::ScrollArea::vertical()
@@ -220,6 +221,12 @@ impl MailmanApp {
                             .filter(|h| !h.key.trim().is_empty())
                             .count();
 
+                        let non_empty_script_count = endpoint
+                            .scripts
+                            .iter()
+                            .filter(|s| !s.extract_key.trim().is_empty())
+                            .count();
+
                         ui.horizontal(|ui| {
                             ui.selectable_value(
                                 &mut request_editor_tab,
@@ -237,6 +244,16 @@ impl MailmanApp {
                                 &mut request_editor_tab,
                                 RequestEditorTab::Body,
                                 "Body",
+                            )
+                            .cursor_hand();
+                            ui.selectable_value(
+                                &mut request_editor_tab,
+                                RequestEditorTab::Scripts,
+                                if non_empty_script_count > 0 {
+                                    format!("Scripts ({non_empty_script_count})")
+                                } else {
+                                    "Scripts".to_owned()
+                                },
                             )
                             .cursor_hand();
                         });
@@ -360,6 +377,74 @@ impl MailmanApp {
                                 ui.add_space(4.0);
                                 if ui.button("+ Add Header").cursor_hand().clicked() {
                                     endpoint.headers.push(KeyValue::default());
+                                    changed = true;
+                                }
+                            }
+
+                            RequestEditorTab::Scripts => {
+                                ui.label(
+                                    RichText::new(
+                                        "After a 2xx response, each rule extracts a value \
+                                         from the JSON body and writes it to an env variable. \
+                                         Use dot notation for nested keys, e.g. data.access_token",
+                                    )
+                                    .color(theme::MUTED)
+                                    .size(11.0),
+                                );
+                                ui.add_space(4.0);
+
+                                for (script_index, script) in
+                                    endpoint.scripts.iter_mut().enumerate()
+                                {
+                                    ui.horizontal(|ui| {
+                                        let (key_w, val_w, rm_w) = kv_row_widths(ui);
+                                        let r = ui.add(
+                                            TextEdit::singleline(&mut script.extract_key)
+                                                .desired_width(key_w)
+                                                .hint_text("data.access_token"),
+                                        );
+                                        attach_text_context_menu(
+                                            &r, &script.extract_key, true,
+                                        );
+                                        if r.changed() { changed = true; }
+
+                                        ui.label(
+                                            RichText::new("→")
+                                                .color(theme::MUTED)
+                                                .size(12.0),
+                                        );
+
+                                        let r = ui.add(
+                                            TextEdit::singleline(&mut script.env_var)
+                                                .desired_width(val_w - 20.0)
+                                                .hint_text("token"),
+                                        );
+                                        attach_text_context_menu(
+                                            &r, &script.env_var, true,
+                                        );
+                                        if r.changed() { changed = true; }
+
+                                        if ui
+                                            .add(
+                                                egui::Button::new("×")
+                                                    .min_size(egui::vec2(rm_w, 0.0)),
+                                            )
+                                            .cursor_hand()
+                                            .clicked()
+                                        {
+                                            remove_script_index = Some(script_index);
+                                        }
+                                    });
+                                }
+
+                                if let Some(si) = remove_script_index {
+                                    endpoint.scripts.remove(si);
+                                    changed = true;
+                                }
+
+                                ui.add_space(4.0);
+                                if ui.button("+ Add Rule").cursor_hand().clicked() {
+                                    endpoint.scripts.push(ResponseScript::default());
                                     changed = true;
                                 }
                             }

@@ -117,42 +117,74 @@ impl MailmanApp {
                             .push(index);
                     }
 
+                    // On the very first render after launch, figure out which
+                    // collection + folder to auto-expand to reach the restored selection.
+                    let expand = self.expand_to_selection;
+                    let selected_location = if expand {
+                        self.selected_endpoint_id
+                            .as_ref()
+                            .and_then(|id| self.endpoints.iter().find(|e| &e.id == id))
+                            .map(|ep| {
+                                let coll = non_empty_trimmed(&ep.collection)
+                                    .unwrap_or("General")
+                                    .to_owned();
+                                let fold = ep.folder_path.trim().to_owned();
+                                (coll, fold)
+                            })
+                    } else {
+                        None
+                    };
+
                     for (collection, folders) in grouped {
-                        ui.collapsing(RichText::new(&collection).strong(), |ui| {
-                            for (folder, indexes) in folders {
-                                if folder.is_empty() {
-                                    for endpoint_index in indexes {
-                                        let endpoint = &self.endpoints[endpoint_index];
-                                        let is_selected = self.selected_endpoint_id.as_deref()
-                                            == Some(endpoint.id.as_str());
-                                        let endpoint_id = endpoint.id.clone();
-                                        let endpoint_method = endpoint.method.clone();
-                                        let endpoint_name = endpoint.name.clone();
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(2.0);
-                                            ui.label(
-                                                RichText::new(format!("{:<6}", &endpoint_method))
-                                                    .color(method_color(&endpoint_method))
-                                                    .monospace()
-                                                    .size(11.0),
-                                            );
-                                            let name = if is_selected {
-                                                RichText::new(&endpoint_name).strong()
-                                            } else {
-                                                RichText::new(&endpoint_name)
-                                            };
-                                            if ui.selectable_label(is_selected, name).cursor_hand().clicked() {
-                                                self.set_selected_endpoint(Some(
-                                                    endpoint_id.clone(),
-                                                ));
-                                                selection_changed = true;
-                                            }
-                                        });
-                                    }
-                                } else {
-                                    ui.collapsing(
-                                        RichText::new(&folder).color(theme::MUTED),
-                                        |ui| {
+                        let coll_open = selected_location
+                            .as_ref()
+                            .map(|(c, _)| c == &collection)
+                            .unwrap_or(false);
+
+                        egui::CollapsingHeader::new(RichText::new(&collection).strong())
+                            .id_salt(format!("coll_{collection}"))
+                            .open(if coll_open { Some(true) } else { None })
+                            .show(ui, |ui| {
+                                for (folder, indexes) in folders {
+                                    if folder.is_empty() {
+                                        for endpoint_index in indexes {
+                                            let endpoint = &self.endpoints[endpoint_index];
+                                            let is_selected = self.selected_endpoint_id.as_deref()
+                                                == Some(endpoint.id.as_str());
+                                            let endpoint_id = endpoint.id.clone();
+                                            let endpoint_method = endpoint.method.clone();
+                                            let endpoint_name = endpoint.name.clone();
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(2.0);
+                                                ui.label(
+                                                    RichText::new(format!("{:<6}", &endpoint_method))
+                                                        .color(method_color(&endpoint_method))
+                                                        .monospace()
+                                                        .size(11.0),
+                                                );
+                                                let name = if is_selected {
+                                                    RichText::new(&endpoint_name).strong()
+                                                } else {
+                                                    RichText::new(&endpoint_name)
+                                                };
+                                                if ui.selectable_label(is_selected, name).cursor_hand().clicked() {
+                                                    self.set_selected_endpoint(Some(endpoint_id.clone()));
+                                                    selection_changed = true;
+                                                }
+                                            });
+                                        }
+                                    } else {
+                                        let fold_open = selected_location
+                                            .as_ref()
+                                            .map(|(c, f)| c == &collection && f == &folder)
+                                            .unwrap_or(false);
+
+                                        egui::CollapsingHeader::new(
+                                            RichText::new(&folder).color(theme::MUTED),
+                                        )
+                                        .id_salt(format!("fold_{collection}_{folder}"))
+                                        .open(if fold_open { Some(true) } else { None })
+                                        .show(ui, |ui| {
                                             for endpoint_index in indexes {
                                                 let endpoint = &self.endpoints[endpoint_index];
                                                 let is_selected =
@@ -189,12 +221,14 @@ impl MailmanApp {
                                                     }
                                                 });
                                             }
-                                        },
-                                    );
+                                        });
+                                    }
                                 }
-                            }
-                        });
+                            });
                     }
+
+                    // Only expand once — user controls state from here on.
+                    self.expand_to_selection = false;
 
                     if selection_changed {
                         self.mark_dirty();

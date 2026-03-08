@@ -61,7 +61,21 @@ impl MailmanApp {
                                 );
                             }
                             ui.add_space(10.0);
-                            ui.label(RichText::new("Mail Man").size(22.0).strong());
+                            {
+                                let font = egui::FontId::proportional(22.0);
+                                let mut job = egui::text::LayoutJob::default();
+                                job.append("Mail", 0.0, egui::text::TextFormat {
+                                    font_id: font.clone(),
+                                    color: ui.visuals().strong_text_color(),
+                                    ..Default::default()
+                                });
+                                job.append("man", 0.0, egui::text::TextFormat {
+                                    font_id: font,
+                                    color: ui.visuals().text_color(),
+                                    ..Default::default()
+                                });
+                                ui.label(job);
+                            }
                             ui.add_space(3.0);
                             ui.label(
                                 RichText::new("Offline-first API client")
@@ -73,6 +87,8 @@ impl MailmanApp {
                         ui.add_space(20.0);
                         ui.separator();
                         ui.add_space(16.0);
+
+                        let pending = self.auth_pending;
 
                         match self.phase {
                             AppPhase::SetupPassword => {
@@ -89,35 +105,59 @@ impl MailmanApp {
                                 );
                                 ui.add_space(14.0);
 
-                                let r = ui.add(
+                                let r = ui.add_enabled(
+                                    !pending,
                                     TextEdit::singleline(&mut self.setup_password)
                                         .password(true)
                                         .hint_text("Master password (min 12 chars)")
                                         .desired_width(f32::INFINITY),
                                 );
-                                attach_text_context_menu(&r, &self.setup_password, true);
+                                if !pending {
+                                    attach_text_context_menu(&r, &self.setup_password, true);
+                                }
                                 ui.add_space(6.0);
-                                let r = ui.add(
+                                let r = ui.add_enabled(
+                                    !pending,
                                     TextEdit::singleline(&mut self.setup_password_confirm)
                                         .password(true)
                                         .hint_text("Confirm password")
                                         .desired_width(f32::INFINITY),
                                 );
-                                attach_text_context_menu(
-                                    &r,
-                                    &self.setup_password_confirm,
-                                    true,
-                                );
+                                if !pending {
+                                    attach_text_context_menu(
+                                        &r,
+                                        &self.setup_password_confirm,
+                                        true,
+                                    );
+                                }
                                 ui.add_space(16.0);
 
-                                let btn = egui::Button::new(
-                                    RichText::new("Configure Encryption and Open")
-                                        .color(Color32::WHITE),
-                                )
-                                .fill(theme::ACCENT)
-                                .min_size(egui::vec2(ui.available_width(), 32.0));
-                                if ui.add(btn).cursor_hand().clicked() {
-                                    self.handle_setup_password_submission();
+                                if pending {
+                                    ui.horizontal(|ui| {
+                                        let btn_w = ui.available_width();
+                                        let btn = egui::Button::new(
+                                            RichText::new("Configuring…").color(
+                                                Color32::from_white_alpha(120),
+                                            ),
+                                        )
+                                        .fill(theme::ACCENT.gamma_multiply(0.5))
+                                        .min_size(egui::vec2(btn_w, 32.0));
+                                        ui.add_enabled(false, btn);
+                                    });
+                                    ui.add_space(6.0);
+                                    ui.vertical_centered(|ui| {
+                                        ui.spinner();
+                                    });
+                                } else {
+                                    let btn = egui::Button::new(
+                                        RichText::new("Configure Encryption and Open")
+                                            .color(Color32::WHITE),
+                                    )
+                                    .fill(theme::ACCENT)
+                                    .min_size(egui::vec2(ui.available_width(), 32.0));
+                                    if ui.add(btn).cursor_hand().clicked() {
+                                        self.handle_setup_password_submission();
+                                    }
                                 }
                             }
                             AppPhase::UnlockPassword => {
@@ -133,22 +173,83 @@ impl MailmanApp {
                                 );
                                 ui.add_space(14.0);
 
-                                let r = ui.add(
+                                let r = ui.add_enabled(
+                                    !pending,
                                     TextEdit::singleline(&mut self.unlock_password)
                                         .password(true)
                                         .hint_text("Master password")
                                         .desired_width(f32::INFINITY),
                                 );
-                                attach_text_context_menu(&r, &self.unlock_password, true);
-                                ui.add_space(16.0);
+                                if !pending {
+                                    attach_text_context_menu(&r, &self.unlock_password, true);
+                                }
+                                ui.add_space(10.0);
 
-                                let btn = egui::Button::new(
-                                    RichText::new("Unlock").color(Color32::WHITE),
-                                )
-                                .fill(theme::ACCENT)
-                                .min_size(egui::vec2(ui.available_width(), 32.0));
-                                if ui.add(btn).cursor_hand().clicked() {
-                                    self.handle_unlock_password_submission();
+                                // ── Session duration picker ──────────────────
+                                const LABELS: [&str; 6] =
+                                    ["Always ask", "1 day", "7 days", "14 days", "30 days", "Forever"];
+                                const VALUES: [Option<u32>; 6] =
+                                    [None, Some(1), Some(7), Some(14), Some(30), Some(0)];
+
+                                let current_idx = VALUES
+                                    .iter()
+                                    .position(|v| *v == self.config.session_duration_days)
+                                    .unwrap_or(0);
+
+                                let mut selected_idx = current_idx;
+                                ui.add_enabled_ui(!pending, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("Keep me signed in:")
+                                                .size(12.0)
+                                                .color(theme::MUTED),
+                                        );
+                                        egui::ComboBox::from_id_salt("session-duration")
+                                            .selected_text(LABELS[selected_idx])
+                                            .width(110.0)
+                                            .show_ui(ui, |ui| {
+                                                for (i, label) in LABELS.iter().enumerate() {
+                                                    ui.selectable_value(
+                                                        &mut selected_idx,
+                                                        i,
+                                                        *label,
+                                                    );
+                                                }
+                                            });
+                                    });
+                                });
+
+                                if selected_idx != current_idx {
+                                    self.config.session_duration_days = VALUES[selected_idx];
+                                    let _ = self.storage.save_config(&self.config);
+                                }
+
+                                ui.add_space(12.0);
+
+                                if pending {
+                                    ui.horizontal(|ui| {
+                                        let btn_w = ui.available_width();
+                                        let btn = egui::Button::new(
+                                            RichText::new("Verifying…")
+                                                .color(Color32::from_white_alpha(120)),
+                                        )
+                                        .fill(theme::ACCENT.gamma_multiply(0.5))
+                                        .min_size(egui::vec2(btn_w, 32.0));
+                                        ui.add_enabled(false, btn);
+                                    });
+                                    ui.add_space(6.0);
+                                    ui.vertical_centered(|ui| {
+                                        ui.spinner();
+                                    });
+                                } else {
+                                    let btn = egui::Button::new(
+                                        RichText::new("Unlock").color(Color32::WHITE),
+                                    )
+                                    .fill(theme::ACCENT)
+                                    .min_size(egui::vec2(ui.available_width(), 32.0));
+                                    if ui.add(btn).cursor_hand().clicked() {
+                                        self.handle_unlock_password_submission();
+                                    }
                                 }
                             }
                             AppPhase::Ready => {}
