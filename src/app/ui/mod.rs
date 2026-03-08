@@ -19,6 +19,7 @@ impl eframe::App for MailmanApp {
         ctx.set_visuals(egui::Visuals::dark());
 
         if self.phase != AppPhase::Ready {
+            self.poll_auth_channel();
             self.render_auth_screen(ctx);
             ctx.request_repaint_after(Duration::from_millis(16));
             return;

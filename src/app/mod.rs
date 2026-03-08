@@ -3,7 +3,7 @@ pub(crate) mod ui;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,12 @@ use crate::models::{
 };
 use crate::request_body::normalize_body_mode_owned;
 use crate::storage::{AppStorage, CoreData};
+
+pub(in crate::app) enum AuthResult {
+    SetupOk { metadata: SecurityMetadata, key: KeyMaterial },
+    UnlockOk(KeyMaterial),
+    Err(String),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::app) enum AppPhase {
@@ -79,6 +85,9 @@ pub(crate) struct MailmanApp {
     pub(in crate::app) last_mutation: Instant,
     pub(in crate::app) in_flight: bool,
     pub(in crate::app) response_rx: Option<Receiver<ResponseState>>,
+
+    pub(in crate::app) auth_pending: bool,
+    pub(in crate::app) auth_rx: Option<Receiver<AuthResult>>,
 
     pub(in crate::app) new_environment_name: String,
     pub(in crate::app) postman_import_path: String,
@@ -161,6 +170,8 @@ impl MailmanApp {
             last_mutation: Instant::now(),
             in_flight: false,
             response_rx: None,
+            auth_pending: false,
+            auth_rx: None,
             new_environment_name: String::new(),
             postman_import_path: String::new(),
             postman_workspace_filter: String::new(),
@@ -320,6 +331,10 @@ impl MailmanApp {
     }
 
     pub(in crate::app) fn handle_setup_password_submission(&mut self) {
+        if self.auth_pending {
+            return;
+        }
+
         let password = self.setup_password.clone();
         let confirm = self.setup_password_confirm.clone();
 
@@ -332,54 +347,45 @@ impl MailmanApp {
             return;
         }
 
-        let (metadata, key) = match create_security_metadata(&password) {
-            Ok(result) => result,
-            Err(err) => {
-                self.auth_message = format!("Failed to configure encryption: {err}");
-                return;
-            }
-        };
+        let (tx, rx): (Sender<AuthResult>, Receiver<AuthResult>) = mpsc::channel();
 
-        if let Err(err) = self.storage.save_security_metadata(&metadata) {
-            self.auth_message = format!("Failed to persist security metadata: {err}");
-            return;
-        }
-
-        self.security_metadata = Some(metadata);
-        self.setup_password.clear();
-        self.setup_password_confirm.clear();
-
-        if let Err(err) = self.complete_unlock(key) {
-            self.auth_message = err;
-            return;
-        }
-
+        self.auth_pending = true;
+        self.auth_rx = Some(rx);
         self.auth_message = String::new();
-        self.phase = AppPhase::Ready;
+
+        thread::spawn(move || {
+            let result = match create_security_metadata(&password) {
+                Ok((metadata, key)) => AuthResult::SetupOk { metadata, key },
+                Err(err) => AuthResult::Err(format!("Failed to configure encryption: {err}")),
+            };
+            let _ = tx.send(result);
+        });
     }
 
     pub(in crate::app) fn handle_unlock_password_submission(&mut self) {
-        let Some(metadata) = self.security_metadata.as_ref() else {
+        if self.auth_pending {
+            return;
+        }
+
+        let Some(metadata) = self.security_metadata.clone() else {
             self.auth_message = "Missing security metadata; restart app.".to_owned();
             return;
         };
 
-        let key = match verify_password(&self.unlock_password, metadata) {
-            Ok(key) => key,
-            Err(err) => {
-                self.auth_message = format!("Invalid password: {err}");
-                return;
-            }
-        };
+        let password = self.unlock_password.clone();
+        let (tx, rx): (Sender<AuthResult>, Receiver<AuthResult>) = mpsc::channel();
 
-        self.unlock_password.clear();
-        if let Err(err) = self.complete_unlock(key) {
-            self.auth_message = err;
-            return;
-        }
-
+        self.auth_pending = true;
+        self.auth_rx = Some(rx);
         self.auth_message = String::new();
-        self.phase = AppPhase::Ready;
+
+        thread::spawn(move || {
+            let result = match verify_password(&password, &metadata) {
+                Ok(key) => AuthResult::UnlockOk(key),
+                Err(err) => AuthResult::Err(format!("Invalid password: {err}")),
+            };
+            let _ = tx.send(result);
+        });
     }
 
     fn complete_unlock(&mut self, key: KeyMaterial) -> Result<(), String> {
@@ -633,6 +639,56 @@ impl MailmanApp {
                 self.response_raw_chunks.clear();
                 self.parsed_response_json = None;
                 self.parsed_response_json_error = None;
+            }
+        }
+    }
+
+    pub(in crate::app) fn poll_auth_channel(&mut self) {
+        let Some(rx) = &self.auth_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.auth_pending = false;
+                self.auth_rx = None;
+
+                match result {
+                    AuthResult::UnlockOk(key) => {
+                        self.unlock_password.clear();
+                        if let Err(err) = self.complete_unlock(key) {
+                            self.auth_message = err;
+                            return;
+                        }
+                        self.auth_message = String::new();
+                        self.phase = AppPhase::Ready;
+                    }
+                    AuthResult::SetupOk { metadata, key } => {
+                        if let Err(err) = self.storage.save_security_metadata(&metadata) {
+                            self.auth_message =
+                                format!("Failed to persist security metadata: {err}");
+                            return;
+                        }
+                        self.security_metadata = Some(metadata);
+                        self.setup_password.clear();
+                        self.setup_password_confirm.clear();
+                        if let Err(err) = self.complete_unlock(key) {
+                            self.auth_message = err;
+                            return;
+                        }
+                        self.auth_message = String::new();
+                        self.phase = AppPhase::Ready;
+                    }
+                    AuthResult::Err(msg) => {
+                        self.auth_message = msg;
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.auth_pending = false;
+                self.auth_rx = None;
+                self.auth_message = "Authentication worker disconnected unexpectedly.".to_owned();
             }
         }
     }
