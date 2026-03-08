@@ -92,6 +92,10 @@ pub(crate) struct MailmanApp {
     pub(in crate::app) import_bundle_password: String,
     pub(in crate::app) request_editor_tab: RequestEditorTab,
     pub(in crate::app) logo_texture: Option<egui::TextureHandle>,
+    /// Set to `true` on startup; the sidebar uses it to auto-expand the
+    /// collection/folder containing the selected endpoint on first render,
+    /// then resets it to `false`.
+    pub(in crate::app) expand_to_selection: bool,
 }
 
 impl MailmanApp {
@@ -166,6 +170,7 @@ impl MailmanApp {
             import_bundle_password: String::new(),
             request_editor_tab: RequestEditorTab::Params,
             logo_texture: None,
+            expand_to_selection: true,
         }
     }
 
