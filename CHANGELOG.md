@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.4.0 - 08/03/2026
+
+### Authentication & Sessions
+
+- **Persistent sessions via OS keychain** — a new "Keep me signed in" dropdown on the unlock screen lets you choose how long the derived key is cached: 1 day, 7 days, 14 days, 30 days, forever, or always-ask. The raw password is never stored — only the 32-byte Argon2id output, held in macOS Keychain / Windows Credential Manager / Linux Secret Service.
+- **Lock button** — a padlock icon in the top-right of the toolbar immediately wipes the key from memory, clears the keychain entry, and returns to the unlock screen.
+- **Non-blocking unlock** — the Argon2id KDF (64 MB, 3 iterations) now runs on a background thread. While verifying, the password field, session picker, and button are disabled; the button label switches to "Verifying…" / "Configuring…" and a spinner appears — no more frozen window on login.
+
+### Scripts Tab (Post-Response Automation)
+
+- **New "Scripts" tab in the request editor** — define rules that automatically extract values from a JSON response and write them into the active environment after any 2xx reply.
+- **Dot-notation JSON path targeting** — paths like `data.access_token` or `user.id` drill into nested objects; array indexing (`items.0.id`) is supported.
+- **Live rule badge** — a pill in the response panel header shows how many script rules ran successfully on the last response, so you can confirm extraction at a glance.
+
+### Sidebar
+
+- **Auto-expand to previously selected endpoint** — on launch, the sidebar automatically opens the collection/folder that contains the last-used endpoint so it's visible without manual navigation.
+
+### Toolbar
+
+- **App version displayed** — the current semver is rendered in the toolbar for quick reference.
+
+### Refactoring
+
+- **Brand rename** — "Mail Man" (two words) is now "Mailman" everywhere: window title, wordmark, dialog strings, README, and changelog. The wordmark in the toolbar and auth screen uses a two-tone `LayoutJob` (`Mail` in strong colour, `man` in body colour) as a single centred widget.
+
+---
+
 ## v0.3.0 - 08/03/2026
 
 ### UI Rebrand & Visual Polish
