@@ -61,11 +61,10 @@ impl MailmanApp {
                 };
 
                 let mut changed = false;
-                let mut remove_index: Option<usize> = None;
 
+                // Fixed header: env name + file path
                 {
                     let env = &mut self.environments[index];
-
                     let response = ui.add(
                         TextEdit::singleline(&mut env.name)
                             .desired_width(f32::INFINITY)
@@ -80,53 +79,66 @@ impl MailmanApp {
                             .color(theme::MUTED)
                             .size(11.0),
                     );
-                    ui.separator();
-
-                    for (variable_index, variable) in env.variables.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            let row_width = ui.available_width();
-                            let spacing = ui.spacing().item_spacing.x;
-                            let remove_width = 22.0_f32;
-                            let key_width = ((row_width - remove_width - spacing * 2.0) * 0.38)
-                                .clamp(80.0, 180.0);
-                            let value_width =
-                                (row_width - key_width - remove_width - spacing * 2.0).max(80.0);
-
-                            let response = ui.add_sized(
-                                [key_width, 0.0],
-                                TextEdit::singleline(&mut variable.key).hint_text("key"),
-                            );
-                            attach_text_context_menu(&response, &variable.key, true);
-                            if response.changed() {
-                                changed = true;
-                            }
-                            let response = ui.add_sized(
-                                [value_width, 0.0],
-                                TextEdit::singleline(&mut variable.value).hint_text("value"),
-                            );
-                            attach_text_context_menu(&response, &variable.value, true);
-                            if response.changed() {
-                                changed = true;
-                            }
-                            if ui
-                                .add_sized([remove_width, 0.0], egui::Button::new("×"))
-                                .clicked()
-                            {
-                                remove_index = Some(variable_index);
-                            }
-                        });
-                    }
-
-                    if let Some(variable_index) = remove_index {
-                        env.variables.remove(variable_index);
-                        changed = true;
-                    }
-
-                    if ui.button("+ Add Variable").clicked() {
-                        env.variables.push(KeyValue::default());
-                        changed = true;
-                    }
                 }
+                ui.separator();
+
+                // Scrollable variable list
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let mut remove_index: Option<usize> = None;
+                        let env = &mut self.environments[index];
+
+                        for (variable_index, variable) in env.variables.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                let row_width = ui.available_width();
+                                let spacing = ui.spacing().item_spacing.x;
+                                let remove_width = 22.0_f32;
+                                let key_width =
+                                    ((row_width - remove_width - spacing * 2.0) * 0.38)
+                                        .clamp(80.0, 180.0);
+                                let value_width = (row_width
+                                    - key_width
+                                    - remove_width
+                                    - spacing * 2.0)
+                                    .max(80.0);
+
+                                let response = ui.add_sized(
+                                    [key_width, 0.0],
+                                    TextEdit::singleline(&mut variable.key).hint_text("key"),
+                                );
+                                attach_text_context_menu(&response, &variable.key, true);
+                                if response.changed() {
+                                    changed = true;
+                                }
+                                let response = ui.add_sized(
+                                    [value_width, 0.0],
+                                    TextEdit::singleline(&mut variable.value).hint_text("value"),
+                                );
+                                attach_text_context_menu(&response, &variable.value, true);
+                                if response.changed() {
+                                    changed = true;
+                                }
+                                if ui
+                                    .add_sized([remove_width, 0.0], egui::Button::new("×"))
+                                    .clicked()
+                                {
+                                    remove_index = Some(variable_index);
+                                }
+                            });
+                        }
+
+                        if let Some(variable_index) = remove_index {
+                            env.variables.remove(variable_index);
+                            changed = true;
+                        }
+
+                        ui.add_space(4.0);
+                        if ui.button("+ Add Variable").clicked() {
+                            env.variables.push(KeyValue::default());
+                            changed = true;
+                        }
+                    });
 
                 if changed {
                     self.mark_dirty();

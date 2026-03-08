@@ -1,5 +1,8 @@
 use eframe::egui::Color32;
 
+// Logo-inspired palette: warm orange gradient background + postal blue uniform
+pub(in crate::app) const ACCENT: Color32 = Color32::from_rgb(222, 108, 24); // logo's warm orange
+
 pub(in crate::app) const ERROR: Color32 = Color32::from_rgb(230, 80, 80);
 pub(in crate::app) const SUCCESS: Color32 = Color32::from_rgb(80, 195, 130);
 pub(in crate::app) const WARNING: Color32 = Color32::from_rgb(225, 155, 55);

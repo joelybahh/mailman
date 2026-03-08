@@ -87,6 +87,7 @@ pub(crate) struct MailmanApp {
     pub(in crate::app) import_bundle_path: Option<PathBuf>,
     pub(in crate::app) import_bundle_password: String,
     pub(in crate::app) request_editor_tab: RequestEditorTab,
+    pub(in crate::app) logo_texture: Option<egui::TextureHandle>,
 }
 
 impl MailmanApp {
@@ -159,6 +160,7 @@ impl MailmanApp {
             import_bundle_path: None,
             import_bundle_password: String::new(),
             request_editor_tab: RequestEditorTab::Params,
+            logo_texture: None,
         }
     }
 
