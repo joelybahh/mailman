@@ -85,6 +85,20 @@ impl MailmanApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("🔒 Lock").size(13.0))
+                                    .frame(false),
+                            )
+                            .on_hover_text("Lock workspace")
+                            .cursor_hand()
+                            .clicked()
+                        {
+                            self.lock_workspace();
+                        }
+
+                        ui.separator();
+
                         if !self.show_environment_panel
                             && ui
                                 .button(RichText::new("Env Settings").size(13.0))

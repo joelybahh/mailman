@@ -154,7 +154,42 @@ impl MailmanApp {
                                         .desired_width(f32::INFINITY),
                                 );
                                 attach_text_context_menu(&r, &self.unlock_password, true);
-                                ui.add_space(16.0);
+                                ui.add_space(10.0);
+
+                                // ── Session duration picker ──────────────────
+                                const LABELS: [&str; 6] =
+                                    ["Always ask", "1 day", "7 days", "14 days", "30 days", "Forever"];
+                                const VALUES: [Option<u32>; 6] =
+                                    [None, Some(1), Some(7), Some(14), Some(30), Some(0)];
+
+                                let current_idx = VALUES
+                                    .iter()
+                                    .position(|v| *v == self.config.session_duration_days)
+                                    .unwrap_or(0);
+
+                                let mut selected_idx = current_idx;
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Keep me signed in:")
+                                            .size(12.0)
+                                            .color(theme::MUTED),
+                                    );
+                                    egui::ComboBox::from_id_salt("session-duration")
+                                        .selected_text(LABELS[selected_idx])
+                                        .width(110.0)
+                                        .show_ui(ui, |ui| {
+                                            for (i, label) in LABELS.iter().enumerate() {
+                                                ui.selectable_value(&mut selected_idx, i, *label);
+                                            }
+                                        });
+                                });
+
+                                if selected_idx != current_idx {
+                                    self.config.session_duration_days = VALUES[selected_idx];
+                                    let _ = self.storage.save_config(&self.config);
+                                }
+
+                                ui.add_space(12.0);
 
                                 let btn = egui::Button::new(
                                     RichText::new("Unlock").color(Color32::WHITE),

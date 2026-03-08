@@ -131,6 +131,18 @@ pub(crate) struct AppConfig {
     pub(crate) window_width: Option<u32>,
     #[serde(default)]
     pub(crate) window_height: Option<u32>,
+    /// How long a saved session should last after a successful unlock.
+    /// `None`    = always ask for password (default).
+    /// `Some(0)` = keep forever (no expiry).
+    /// `Some(n)` = keep for n days, extended on each launch.
+    #[serde(default)]
+    pub(crate) session_duration_days: Option<u32>,
+    /// Unix timestamp (seconds) when the current cached session expires.
+    /// `None`         = no active session.
+    /// `Some(u64::MAX)` = never expires.
+    /// `Some(ts)`     = expires at `ts`.
+    #[serde(default)]
+    pub(crate) session_expires_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

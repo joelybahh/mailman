@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::domain::{
-    ImportScanResult, ImportSummary, ImportedEnvironment, build_curl_command, create_id,
-    create_security_metadata, default_endpoints, default_environment_index, default_environments,
-    default_postman_directories, deserialize_workspace_bundle, endpoint_dedup_key, execute_request,
-    merge_endpoint_details, normalize_endpoint_url_and_query_params,
-    normalize_folder_path, resolve_folder_path_from_lookup,
-    scan_postman_directory, serialize_workspace_bundle, verify_password,
+    ImportScanResult, ImportSummary, ImportedEnvironment, build_curl_command, clear_session_key,
+    create_id, create_security_metadata, default_endpoints, default_environment_index,
+    default_environments, default_postman_directories, deserialize_workspace_bundle,
+    endpoint_dedup_key, execute_request, load_session_key, merge_endpoint_details,
+    normalize_endpoint_url_and_query_params, normalize_folder_path,
+    resolve_folder_path_from_lookup, save_session_key, scan_postman_directory,
+    serialize_workspace_bundle, verify_password,
 };
 use crate::models::{
     AppConfig, Endpoint, Environment, EnvironmentIndexEntry, KeyMaterial, KeyValue, ResponseState,
@@ -130,7 +131,7 @@ impl MailmanApp {
             AppPhase::SetupPassword
         };
 
-        Self {
+        let mut app = Self {
             storage,
             phase,
             security_metadata,
@@ -171,12 +172,29 @@ impl MailmanApp {
             request_editor_tab: RequestEditorTab::Params,
             logo_texture: None,
             expand_to_selection: true,
-        }
+        };
+
+        app.try_auto_session_unlock();
+        app
     }
 
     pub(in crate::app) fn mark_dirty(&mut self) {
         self.dirty = true;
         self.last_mutation = Instant::now();
+    }
+
+    pub(in crate::app) fn lock_workspace(&mut self) {
+        // Wipe the key from memory.
+        self.key_material = None;
+        self.environments.clear();
+
+        // Remove the cached session key from the OS keychain and clear the
+        // recorded expiry so the user must unlock again.
+        clear_session_key();
+        self.config.session_expires_at = None;
+        let _ = self.storage.save_config(&self.config);
+
+        self.phase = AppPhase::UnlockPassword;
     }
 
     pub(in crate::app) fn sync_window_resolution(&mut self, ctx: &egui::Context) {
@@ -393,7 +411,79 @@ impl MailmanApp {
             }
         }
 
+        // Save or clear the session key in the OS keychain based on the user's
+        // current session-duration preference.
+        match self.config.session_duration_days {
+            None => {
+                // "Always ask" — remove any previously cached key.
+                clear_session_key();
+                self.config.session_expires_at = None;
+            }
+            Some(duration_days) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let expires_at = if duration_days == 0 {
+                    u64::MAX // forever
+                } else {
+                    now.saturating_add(duration_days as u64 * 86_400)
+                };
+                if let Err(err) = save_session_key(&key) {
+                    eprintln!("Failed to save session key to keychain: {err}");
+                } else {
+                    self.config.session_expires_at = Some(expires_at);
+                    let _ = self.storage.save_config(&self.config);
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Called once during `new()`. If a valid, unexpired session key exists in
+    /// the OS keychain, unlock the workspace automatically so the user skips the
+    /// password prompt.
+    fn try_auto_session_unlock(&mut self) {
+        if self.phase != AppPhase::UnlockPassword {
+            return;
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match self.config.session_expires_at {
+            None => return, // No active session recorded.
+            Some(expires_at) if expires_at != u64::MAX && expires_at < now => {
+                // Session has expired — discard it.
+                self.config.session_expires_at = None;
+                clear_session_key();
+                let _ = self.storage.save_config(&self.config);
+                return;
+            }
+            _ => {} // Valid session (forever or not yet expired).
+        }
+
+        match load_session_key() {
+            Ok(key) => {
+                if let Err(err) = self.complete_unlock(key) {
+                    // Key was stale or environments changed — fall back gracefully.
+                    eprintln!("Cached session key rejected: {err}");
+                    self.config.session_expires_at = None;
+                    clear_session_key();
+                    let _ = self.storage.save_config(&self.config);
+                } else {
+                    self.phase = AppPhase::Ready;
+                }
+            }
+            Err(_) => {
+                // Entry not in keychain (e.g. user deleted it) — clear stale metadata.
+                self.config.session_expires_at = None;
+                let _ = self.storage.save_config(&self.config);
+            }
+        }
     }
 
     pub(in crate::app) fn add_endpoint(&mut self) {
