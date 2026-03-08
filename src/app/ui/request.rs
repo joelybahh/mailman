@@ -51,6 +51,13 @@ impl MailmanApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        // The vertical scrollbar overlays the right edge of the
+                        // scroll area but ui.available_width() doesn't subtract
+                        // it. Clamp content width now so nothing overflows.
+                        let sb = ui.spacing().scroll.bar_outer_margin
+                            + ui.spacing().scroll.bar_width;
+                        ui.set_max_width((ui.available_width() - sb).max(200.0));
+
                         let endpoint = &mut self.endpoints[index];
 
                         // ── Title row: name + collection/folder + Copy cURL ──
@@ -291,6 +298,7 @@ impl MailmanApp {
                                     endpoint.query_params.remove(pi);
                                     changed = true;
                                 }
+                                ui.add_space(4.0);
                                 if ui.button("+ Add Param").cursor_hand().clicked() {
                                     endpoint.query_params.push(KeyValue::default());
                                     changed = true;
@@ -349,6 +357,7 @@ impl MailmanApp {
                                     endpoint.headers.remove(hi);
                                     changed = true;
                                 }
+                                ui.add_space(4.0);
                                 if ui.button("+ Add Header").cursor_hand().clicked() {
                                     endpoint.headers.push(KeyValue::default());
                                     changed = true;
