@@ -410,10 +410,9 @@ pub(crate) fn default_postman_directories() -> Vec<PathBuf> {
     let mut output = vec![];
 
     if let Some(base_dirs) = BaseDirs::new() {
-        let home = base_dirs.home_dir();
-
         #[cfg(target_os = "macos")]
         {
+            let home = base_dirs.home_dir();
             output.push(home.join("Library/Application Support/Postman"));
         }
 
@@ -427,6 +426,7 @@ pub(crate) fn default_postman_directories() -> Vec<PathBuf> {
 
         #[cfg(target_os = "linux")]
         {
+            let home = base_dirs.home_dir();
             output.push(home.join(".config/Postman"));
             output.push(home.join(".var/app/com.getpostman.Postman/config/Postman"));
             output.push(home.join("snap/postman/current/.config/Postman"));
