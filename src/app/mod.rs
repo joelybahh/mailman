@@ -65,6 +65,10 @@ pub(crate) struct MailmanApp {
 
     pub(in crate::app) response: ResponseState,
     pub(in crate::app) response_body_view: String,
+    /// Pre-chunked lines for the Raw view. Long lines are split at token
+    /// boundaries so each label stays under ~400 chars, making egui's
+    /// double-click word-boundary scan instant regardless of response size.
+    pub(in crate::app) response_raw_chunks: Vec<String>,
     pub(in crate::app) parsed_response_json: Option<serde_json::Value>,
     pub(in crate::app) parsed_response_json_error: Option<String>,
     pub(in crate::app) response_view_tab: ResponseViewTab,
@@ -139,6 +143,7 @@ impl MailmanApp {
             auth_message: String::new(),
             response: ResponseState::default(),
             response_body_view: String::new(),
+            response_raw_chunks: Vec::new(),
             parsed_response_json: None,
             parsed_response_json_error: None,
             response_view_tab: ResponseViewTab::Pretty,
@@ -270,6 +275,7 @@ impl MailmanApp {
     pub(in crate::app) fn reset_response_ui_for_request_switch(&mut self) {
         self.response = ResponseState::default();
         self.response_body_view.clear();
+        self.response_raw_chunks.clear();
         self.parsed_response_json = None;
         self.parsed_response_json_error = None;
         self.in_flight = false;
@@ -476,6 +482,7 @@ impl MailmanApp {
         self.in_flight = true;
         self.response.clear_for_request();
         self.response_body_view.clear();
+        self.response_raw_chunks.clear();
         self.parsed_response_json = None;
         self.parsed_response_json_error = None;
         self.response_rx = Some(rx);
@@ -509,6 +516,7 @@ impl MailmanApp {
             Ok(response_state) => {
                 self.response = response_state;
                 self.response_body_view = self.response.body.clone();
+                self.response_raw_chunks = chunk_response_body(&self.response_body_view);
                 self.update_parsed_response_json();
                 self.in_flight = false;
                 self.response_rx = None;
@@ -519,6 +527,7 @@ impl MailmanApp {
                 self.response_rx = None;
                 self.response.error = Some("Request worker disconnected.".to_owned());
                 self.response_body_view.clear();
+                self.response_raw_chunks.clear();
                 self.parsed_response_json = None;
                 self.parsed_response_json_error = None;
             }
@@ -796,4 +805,57 @@ impl MailmanApp {
 
         Ok(self.merge_postman_import(scan_result))
     }
+}
+
+/// Split a response body into display chunks so that no single egui label
+/// exceeds `MAX_CHUNK` bytes. Short lines pass through unchanged. Long lines
+/// (e.g. minified JSON) are broken at token-boundary characters — whitespace,
+/// commas, and JSON structural chars — so double-click word selection stays
+/// O(chunk_size) rather than O(line_length).
+fn chunk_response_body(body: &str) -> Vec<String> {
+    const MAX_CHUNK: usize = 400;
+
+    let mut chunks = Vec::new();
+    for line in body.lines() {
+        if line.len() <= MAX_CHUNK {
+            chunks.push(line.to_owned());
+        } else {
+            let mut remaining = line;
+            while remaining.len() > MAX_CHUNK {
+                let split = find_chunk_split(remaining, MAX_CHUNK);
+                chunks.push(remaining[..split].to_owned());
+                remaining = &remaining[split..];
+            }
+            if !remaining.is_empty() {
+                chunks.push(remaining.to_owned());
+            }
+        }
+    }
+    chunks
+}
+
+/// Return a byte offset at or before `target` where it is safe to split `s`.
+/// Prefers breaking after a token-boundary character; falls back to any valid
+/// UTF-8 char boundary.
+fn find_chunk_split(s: &str, target: usize) -> usize {
+    let end = target.min(s.len());
+    let bytes = s.as_bytes();
+
+    // Walk backwards from `end` to find a token boundary.
+    for i in (1..=end).rev() {
+        if !s.is_char_boundary(i) {
+            continue;
+        }
+        let prev = bytes[i - 1];
+        if matches!(prev, b' ' | b'\t' | b',' | b':' | b'{' | b'}' | b'[' | b']' | b'&' | b'=') {
+            return i;
+        }
+    }
+
+    // No boundary found — split at the last valid char boundary.
+    let mut i = end;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i.max(1)
 }

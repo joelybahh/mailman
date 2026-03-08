@@ -19,11 +19,13 @@ impl HandCursor for egui::Response {
 
 pub(in crate::app) fn attach_text_context_menu(
     response: &egui::Response,
-    current_text: &str,
+    _current_text: &str,
     editable: bool,
 ) {
     let text_edit_id = response.id;
-    let text_char_count = current_text.chars().count();
+    // Do NOT compute chars().count() here — this function is called every frame
+    // and O(n) char iteration on a large response body freezes the UI at 60fps.
+    // "Select All" uses usize::MAX instead; egui clamps it to the actual end.
     let selection_backup_id = text_edit_id.with("selection_backup");
 
     if let Some(state) = egui::TextEdit::load_state(&response.ctx, text_edit_id)
@@ -80,7 +82,7 @@ pub(in crate::app) fn attach_text_context_menu(
                 .cursor
                 .set_char_range(Some(egui::text::CCursorRange::two(
                     egui::text::CCursor::new(0),
-                    egui::text::CCursor::new(text_char_count),
+                    egui::text::CCursor::new(usize::MAX), // egui clamps to actual end
                 )));
             egui::TextEdit::store_state(ui.ctx(), text_edit_id, state);
             ui.close();
