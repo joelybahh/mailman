@@ -39,12 +39,19 @@ impl eframe::App for MailmanApp {
         self.render_status_line(ctx);
 
         self.try_auto_save();
+        self.try_auto_save_workspace_ui();
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Err(err) = self.storage.save_config(&self.config) {
             eprintln!("Failed to persist app config on exit: {err}");
+        }
+        if let Err(err) = self
+            .storage
+            .save_workspace_ui(&self.current_workspace_ui_state())
+        {
+            eprintln!("Failed to persist tab workspace on exit: {err}");
         }
     }
 }

@@ -76,8 +76,7 @@ pub(in crate::app) fn attach_text_context_menu(
         if ui.button("Select All").clicked() {
             ui.ctx()
                 .memory_mut(|memory| memory.request_focus(text_edit_id));
-            let mut state =
-                egui::TextEdit::load_state(ui.ctx(), text_edit_id).unwrap_or_default();
+            let mut state = egui::TextEdit::load_state(ui.ctx(), text_edit_id).unwrap_or_default();
             state
                 .cursor
                 .set_char_range(Some(egui::text::CCursorRange::two(
@@ -100,7 +99,10 @@ pub(in crate::app) fn render_json_leaf(
     let rendered_text = value_text.into();
     // Strip surrounding double-quotes for clipboard so copying a JSON string
     // value like `"Gold"` puts `Gold` on the clipboard, not `"Gold"`.
-    let copy_text = if rendered_text.starts_with('"') && rendered_text.ends_with('"') && rendered_text.len() >= 2 {
+    let copy_text = if rendered_text.starts_with('"')
+        && rendered_text.ends_with('"')
+        && rendered_text.len() >= 2
+    {
         rendered_text[1..rendered_text.len() - 1].to_owned()
     } else {
         rendered_text.clone()

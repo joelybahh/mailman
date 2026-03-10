@@ -3,7 +3,7 @@ use eframe::egui::{self, RichText, TextEdit};
 use crate::app::MailmanApp;
 use crate::models::KeyValue;
 
-use super::shared::{attach_text_context_menu, HandCursor};
+use super::shared::{HandCursor, attach_text_context_menu};
 use super::theme;
 
 impl MailmanApp {
@@ -95,14 +95,11 @@ impl MailmanApp {
                                 let row_width = ui.available_width();
                                 let spacing = ui.spacing().item_spacing.x;
                                 let remove_width = 22.0_f32;
-                                let key_width =
-                                    ((row_width - remove_width - spacing * 2.0) * 0.38)
-                                        .clamp(80.0, 180.0);
-                                let value_width = (row_width
-                                    - key_width
-                                    - remove_width
-                                    - spacing * 2.0)
-                                    .max(80.0);
+                                let key_width = ((row_width - remove_width - spacing * 2.0) * 0.38)
+                                    .clamp(80.0, 180.0);
+                                let value_width =
+                                    (row_width - key_width - remove_width - spacing * 2.0)
+                                        .max(80.0);
 
                                 let response = ui.add_sized(
                                     [key_width, 0.0],

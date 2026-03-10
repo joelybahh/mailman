@@ -43,6 +43,27 @@ pub(crate) const METHOD_OPTIONS: [&str; 9] = [
 pub(crate) const BODY_MODE_OPTIONS: [&str; 5] =
     ["none", "raw", "urlencoded", "form-data", "binary"];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) enum RequestEditorTab {
+    #[default]
+    Params,
+    Headers,
+    Body,
+    Scripts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ResponseViewTab {
+    Raw,
+    Pretty,
+}
+
+impl Default for ResponseViewTab {
+    fn default() -> Self {
+        Self::Pretty
+    }
+}
+
 // has to stay incorrectly named 'delivery-man...' because reasons.
 pub(crate) const VERIFIER_PLAINTEXT: &[u8] = b"delivery-man-unlock-verifier-v1";
 
@@ -163,6 +184,32 @@ pub(crate) struct AppConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct PersistedRequestTab {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) saved_endpoint_id: Option<String>,
+    pub(crate) draft: Endpoint,
+    #[serde(default)]
+    pub(crate) is_dirty: bool,
+    #[serde(default)]
+    pub(crate) editor_tab: RequestEditorTab,
+    #[serde(default)]
+    pub(crate) response_view_tab: ResponseViewTab,
+    #[serde(default)]
+    pub(crate) response: ResponseState,
+    #[serde(default)]
+    pub(crate) scripts_ran: usize,
+}
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+pub(crate) struct WorkspaceUiState {
+    #[serde(default)]
+    pub(crate) active_tab_id: Option<String>,
+    #[serde(default)]
+    pub(crate) open_tabs: Vec<PersistedRequestTab>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct EncryptedBlob {
     pub(crate) version: u8,
     pub(crate) nonce_b64: String,
@@ -196,7 +243,7 @@ pub(crate) struct SharedEnvironment {
     pub(crate) variables: Vec<KeyValue>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub(crate) struct ResponseState {
     pub(crate) status_code: Option<u16>,
     pub(crate) status_text: String,

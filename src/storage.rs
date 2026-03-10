@@ -13,7 +13,7 @@ use crate::domain::{
 };
 use crate::models::{
     AppConfig, EncryptedBlob, Endpoint, Environment, EnvironmentFile, EnvironmentIndexEntry,
-    KeyMaterial, SecurityMetadata,
+    KeyMaterial, SecurityMetadata, WorkspaceUiState,
 };
 use crate::request_body::normalize_body_mode_owned;
 
@@ -25,6 +25,7 @@ pub(crate) struct AppStorage {
     environments_index_path: PathBuf,
     environments_dir: PathBuf,
     config_path: PathBuf,
+    workspace_ui_path: PathBuf,
     security_path: PathBuf,
 }
 
@@ -50,6 +51,7 @@ impl AppStorage {
             requests_dir: base_dir.join("requests"),
             environments_index_path: base_dir.join("environments.json"),
             config_path: base_dir.join("config.json"),
+            workspace_ui_path: base_dir.join("workspace_ui.json"),
             security_path: base_dir.join("security.json"),
             base_dir,
             environments_dir,
@@ -116,9 +118,19 @@ impl AppStorage {
         read_json_or_default::<SecurityMetadata>(&self.security_path)
     }
 
+    pub(crate) fn load_workspace_ui(&self) -> io::Result<Option<WorkspaceUiState>> {
+        self.ensure_directories()?;
+        read_json_or_default::<WorkspaceUiState>(&self.workspace_ui_path)
+    }
+
     pub(crate) fn save_security_metadata(&self, metadata: &SecurityMetadata) -> io::Result<()> {
         self.ensure_directories()?;
         write_json_pretty(&self.security_path, metadata)
+    }
+
+    pub(crate) fn save_workspace_ui(&self, workspace_ui: &WorkspaceUiState) -> io::Result<()> {
+        self.ensure_directories()?;
+        write_json_pretty(&self.workspace_ui_path, workspace_ui)
     }
 
     pub(crate) fn load_environments(
@@ -184,17 +196,17 @@ impl AppStorage {
         Ok((environments, found_legacy_plaintext))
     }
 
-    pub(crate) fn save_all(
+    pub(crate) fn save_requests(&self, endpoints: &[Endpoint]) -> io::Result<()> {
+        self.ensure_directories()?;
+        self.save_endpoints_tree(endpoints)
+    }
+
+    pub(crate) fn save_environments(
         &self,
-        endpoints: &[Endpoint],
         environments: &[Environment],
-        config: &AppConfig,
         key: &KeyMaterial,
     ) -> io::Result<()> {
         self.ensure_directories()?;
-
-        self.save_endpoints_tree(endpoints)?;
-        write_json_pretty(&self.config_path, config)?;
 
         let index_entries = environments
             .iter()

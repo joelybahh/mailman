@@ -45,7 +45,11 @@ impl MailmanApp {
                                 egui::CornerRadius::same(9),
                                 Color32::from_gray(45),
                             );
-                            ui.painter().galley(rect.min + padding, galley, Color32::from_gray(160));
+                            ui.painter().galley(
+                                rect.min + padding,
+                                galley,
+                                Color32::from_gray(160),
+                            );
                         }
                     }
 
@@ -87,8 +91,7 @@ impl MailmanApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new(RichText::new("🔒 Lock").size(13.0))
-                                    .frame(false),
+                                egui::Button::new(RichText::new("🔒 Lock").size(13.0)).frame(false),
                             )
                             .on_hover_text("Lock workspace")
                             .cursor_hand()

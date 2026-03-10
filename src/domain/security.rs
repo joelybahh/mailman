@@ -26,8 +26,7 @@ const KEYRING_ACCOUNT: &str = "session-key";
 
 /// Persist the unlock key in the OS keychain.
 pub(crate) fn save_session_key(key: &KeyMaterial) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| e.to_string())?;
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| e.to_string())?;
     entry
         .set_password(&BASE64.encode(key))
         .map_err(|e| e.to_string())
@@ -35,10 +34,11 @@ pub(crate) fn save_session_key(key: &KeyMaterial) -> Result<(), String> {
 
 /// Retrieve the previously saved unlock key from the OS keychain.
 pub(crate) fn load_session_key() -> Result<KeyMaterial, String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| e.to_string())?;
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| e.to_string())?;
     let encoded = entry.get_password().map_err(|e| e.to_string())?;
-    let bytes = BASE64.decode(encoded.as_bytes()).map_err(|e| e.to_string())?;
+    let bytes = BASE64
+        .decode(encoded.as_bytes())
+        .map_err(|e| e.to_string())?;
     if bytes.len() != 32 {
         return Err(format!("unexpected session key length: {}", bytes.len()));
     }
