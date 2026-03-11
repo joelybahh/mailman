@@ -13,6 +13,26 @@ check-packager:
 	@cargo packager --help >/dev/null
 
 bundle-mac: check-packager
+	# ── Pre-flight cleanup ────────────────────────────────────────────────
+	# Force-detach any lingering /Volumes/Mailman from a prior failed build.
+	-diskutil unmount force /Volumes/Mailman 2>/dev/null || true
+	-hdiutil detach "/Volumes/Mailman" --force 2>/dev/null || true
+	# Remove leftover rw.* intermediates that Finder silently re-mounts.
+	-rm -f dist/packager/rw.Mailman*.dmg
+	# ── Spotlight exclusion ───────────────────────────────────────────────
+	# Prevent mds from grabbing the freshly-mounted rw DMG and blocking the
+	# unmount step inside create-dmg.  These marker files tell Spotlight and
+	# Time Machine to leave the directory alone.
+	@mkdir -p dist/packager
+	@touch dist/packager/.metadata_never_index
+	@touch dist/packager/.com.apple.timemachine.donotpresent
+	# Kick off a background job that touches the Spotlight marker inside the
+	# mounted volume the moment it appears, before mds can open any files.
+	@bash -c 'while ! test -d /Volumes/Mailman; do sleep 0.2; done; \
+	  touch /Volumes/Mailman/.metadata_never_index 2>/dev/null; \
+	  sudo mdutil -i off /Volumes/Mailman 2>/dev/null || true' & \
+	disown
+	# ── Build ─────────────────────────────────────────────────────────────
 	cargo packager --release --formats app,dmg
 
 bundle-linux: check-packager
