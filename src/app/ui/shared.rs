@@ -2,6 +2,9 @@ use eframe::egui::{self, Color32, CursorIcon, RichText};
 
 use super::theme;
 
+pub(in crate::app) const REQUEST_HEADER_BAR_HEIGHT: f32 = 44.0;
+pub(in crate::app) const REQUEST_HEADER_CONTENT_PAD_Y: f32 = 6.0;
+
 /// Convenience extension — chain `.cursor_hand()` on any [`egui::Response`] to show a
 /// pointer cursor when hovered. This is the only reliable per-widget mechanism
 /// in this version of egui (`style.visuals.interact_cursor` is defined but

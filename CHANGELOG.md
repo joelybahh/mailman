@@ -9,7 +9,6 @@
 
 ### Improved
 
-- **Tab management** — request tabs can be reordered and now expose right-click actions for rename, close all, and close all saved.
 - **Request workspace balance** — the request tab strip and sidebar request header now share a thinner, more continuous header treatment.
 
 ## v0.4.0 - 08/03/2026

@@ -7,7 +7,9 @@ use crate::models::{
 };
 use crate::request_body::normalize_body_mode;
 
-use super::shared::{HandCursor, attach_text_context_menu};
+use super::shared::{
+    HandCursor, REQUEST_HEADER_BAR_HEIGHT, REQUEST_HEADER_CONTENT_PAD_Y, attach_text_context_menu,
+};
 use super::theme;
 
 const RIGHT_PAD: f32 = 12.0;
@@ -489,90 +491,136 @@ impl MailmanApp {
         let mut pending_move: Option<(String, usize)> = None;
 
         egui::Frame::default()
-            .inner_margin(egui::Margin::symmetric(0, 2))
+            .inner_margin(egui::Margin::symmetric(
+                0,
+                REQUEST_HEADER_CONTENT_PAD_Y as i8,
+            ))
             .show(ui, |ui| {
-                egui::ScrollArea::horizontal()
-                    .id_salt("request-tabs-strip")
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for (
-                                index,
-                                (tab_id, method, name, is_dirty, is_active, is_in_flight),
-                            ) in tabs.iter().enumerate()
-                            {
-                                ui.group(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                    let label = if *is_dirty {
-                                        format!(
-                                            "* {}",
-                                            if name.is_empty() { "Untitled" } else { name }
-                                        )
-                                    } else if name.is_empty() {
-                                        "Untitled".to_owned()
-                                    } else {
-                                        name.clone()
-                                    };
-                                    let response = ui
-                                        .selectable_label(
-                                            *is_active,
-                                            RichText::new(format!("{method} {label}"))
-                                                .color(method_color(method))
-                                                .size(11.5),
-                                        )
-                                        .cursor_hand();
-                                    if response.clicked() {
-                                        self.activate_request_tab(Some(tab_id.clone()));
-                                    }
-                                    if response.drag_started() {
-                                        self.dragging_tab_id = Some(tab_id.clone());
-                                    }
-                                    if let Some(dragging_tab_id) = self.dragging_tab_id.clone()
-                                        && dragging_tab_id != *tab_id
-                                        && response.hovered()
-                                        && ui.input(|input| input.pointer.primary_down())
-                                    {
-                                        pending_move = Some((dragging_tab_id, index));
-                                    }
-                                    response.context_menu(|ui| {
-                                        if ui.button("Rename").clicked() {
-                                            self.rename_tab_id = Some(tab_id.clone());
-                                            self.rename_buffer = name.clone();
-                                            ui.close();
-                                        }
-                                        if ui.button("Close All").clicked() {
-                                            self.pending_request_action =
-                                                Some(PendingRequestAction::CloseAll);
-                                            ui.close();
-                                        }
-                                        if ui.button("Close All Saved").clicked() {
-                                            self.close_all_saved_tabs();
-                                            ui.close();
-                                        }
-                                    });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(
+                        ui.available_width(),
+                        REQUEST_HEADER_BAR_HEIGHT - REQUEST_HEADER_CONTENT_PAD_Y * 2.0,
+                    ),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        egui::ScrollArea::horizontal()
+                            .id_salt("request-tabs-strip")
+                            .max_height(
+                                REQUEST_HEADER_BAR_HEIGHT - REQUEST_HEADER_CONTENT_PAD_Y * 2.0,
+                            )
+                            .show(ui, |ui| {
+                                ui.set_min_height(
+                                    REQUEST_HEADER_BAR_HEIGHT - REQUEST_HEADER_CONTENT_PAD_Y * 2.0,
+                                );
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.horizontal(|ui| {
+                                            for (
+                                                index,
+                                                (
+                                                    tab_id,
+                                                    method,
+                                                    name,
+                                                    is_dirty,
+                                                    is_active,
+                                                    is_in_flight,
+                                                ),
+                                            ) in tabs.iter().enumerate()
+                                            {
+                                                ui.group(|ui| {
+                                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                                    let label = if *is_dirty {
+                                                        format!(
+                                                            "* {}",
+                                                            if name.is_empty() {
+                                                                "Untitled"
+                                                            } else {
+                                                                name
+                                                            }
+                                                        )
+                                                    } else if name.is_empty() {
+                                                        "Untitled".to_owned()
+                                                    } else {
+                                                        name.clone()
+                                                    };
+                                                    let response = ui
+                                                        .selectable_label(
+                                                            *is_active,
+                                                            RichText::new(format!(
+                                                                "{method} {label}"
+                                                            ))
+                                                            .color(method_color(method))
+                                                            .size(11.5),
+                                                        )
+                                                        .cursor_hand();
+                                                    if response.clicked() {
+                                                        self.activate_request_tab(Some(
+                                                            tab_id.clone(),
+                                                        ));
+                                                    }
+                                                    if response.drag_started() {
+                                                        self.dragging_tab_id = Some(tab_id.clone());
+                                                    }
+                                                    if let Some(dragging_tab_id) =
+                                                        self.dragging_tab_id.clone()
+                                                        && dragging_tab_id != *tab_id
+                                                        && response.hovered()
+                                                        && ui.input(|input| {
+                                                            input.pointer.primary_down()
+                                                        })
+                                                    {
+                                                        pending_move =
+                                                            Some((dragging_tab_id, index));
+                                                    }
+                                                    response.context_menu(|ui| {
+                                                        if ui.button("Rename").clicked() {
+                                                            self.rename_tab_id =
+                                                                Some(tab_id.clone());
+                                                            self.rename_buffer = name.clone();
+                                                            ui.close();
+                                                        }
+                                                        if ui.button("Close All").clicked() {
+                                                            self.pending_request_action = Some(
+                                                                PendingRequestAction::CloseAll,
+                                                            );
+                                                            ui.close();
+                                                        }
+                                                        if ui.button("Close All Saved").clicked() {
+                                                            self.close_all_saved_tabs();
+                                                            ui.close();
+                                                        }
+                                                    });
 
-                                    if ui
-                                        .add(
-                                            egui::Button::new(RichText::new("x").size(11.0).color(
-                                                if *is_in_flight {
-                                                    theme::MUTED
-                                                } else {
-                                                    ui.visuals().text_color()
-                                                },
-                                            ))
-                                            .frame(false),
-                                        )
-                                        .cursor_hand()
-                                        .clicked()
-                                    {
-                                        self.pending_request_action =
-                                            Some(PendingRequestAction::CloseTab {
-                                                tab_id: tab_id.clone(),
-                                            });
-                                    }
-                                });
-                            }
-                        });
-                    });
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(
+                                                                RichText::new("x")
+                                                                    .size(11.0)
+                                                                    .color(if *is_in_flight {
+                                                                        theme::MUTED
+                                                                    } else {
+                                                                        ui.visuals().text_color()
+                                                                    }),
+                                                            )
+                                                            .frame(false),
+                                                        )
+                                                        .cursor_hand()
+                                                        .clicked()
+                                                    {
+                                                        self.pending_request_action =
+                                                            Some(PendingRequestAction::CloseTab {
+                                                                tab_id: tab_id.clone(),
+                                                            });
+                                                    }
+                                                });
+                                            }
+                                        });
+                                    },
+                                );
+                            });
+                    },
+                );
             });
 
         if let Some((dragging_tab_id, target_index)) = pending_move {

@@ -5,7 +5,7 @@ use eframe::egui::{self, RichText};
 use crate::app::MailmanApp;
 use crate::domain::{method_color, non_empty_trimmed};
 
-use super::shared::HandCursor;
+use super::shared::{HandCursor, REQUEST_HEADER_BAR_HEIGHT, REQUEST_HEADER_CONTENT_PAD_Y};
 use super::theme;
 
 #[derive(Clone)]
@@ -27,75 +27,98 @@ impl MailmanApp {
             .default_width(280.0)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Requests").strong().size(14.0));
+                egui::Frame::default()
+                    .inner_margin(egui::Margin::symmetric(
+                        0,
+                        REQUEST_HEADER_CONTENT_PAD_Y as i8,
+                    ))
+                    .show(ui, |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(
+                                ui.available_width(),
+                                REQUEST_HEADER_BAR_HEIGHT - REQUEST_HEADER_CONTENT_PAD_Y * 2.0,
+                            ),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.label(RichText::new("Requests").strong().size(14.0));
 
-                    ui.add_space(4.0);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Delete All").color(theme::MUTED).size(11.0),
-                            )
-                            .frame(false),
-                        )
-                        .cursor_hand()
-                        .clicked()
-                    {
-                        self.delete_all_requests();
-                    }
+                                ui.add_space(4.0);
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Delete All")
+                                                .color(theme::MUTED)
+                                                .size(11.0),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .cursor_hand()
+                                    .clicked()
+                                {
+                                    self.delete_all_requests();
+                                }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new("Save").size(12.0))
-                                    .fill(egui::Color32::TRANSPARENT),
-                            )
-                            .on_hover_text("Save all dirty tabs")
-                            .cursor_hand()
-                            .clicked()
-                        {
-                            match self.save_all_dirty_request_tabs() {
-                                Ok(saved) => {
-                                    self.status_line = if saved == 0 {
-                                        "No dirty request tabs to save.".to_owned()
-                                    } else {
-                                        format!("Saved {saved} request tab(s).")
-                                    };
-                                }
-                                Err(err) => {
-                                    self.status_line = err;
-                                }
-                            }
-                        }
-                        ui.separator();
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("-").color(theme::MUTED).size(14.0),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text("Delete active request")
-                            .cursor_hand()
-                            .clicked()
-                        {
-                            self.delete_selected_endpoint();
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("+").color(super::theme::ACCENT).size(16.0),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text("New request tab")
-                            .cursor_hand()
-                            .clicked()
-                        {
-                            self.add_endpoint();
-                        }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(RichText::new("Save").size(12.0))
+                                                    .fill(egui::Color32::TRANSPARENT),
+                                            )
+                                            .on_hover_text("Save all dirty tabs")
+                                            .cursor_hand()
+                                            .clicked()
+                                        {
+                                            match self.save_all_dirty_request_tabs() {
+                                                Ok(saved) => {
+                                                    self.status_line = if saved == 0 {
+                                                        "No dirty request tabs to save.".to_owned()
+                                                    } else {
+                                                        format!("Saved {saved} request tab(s).")
+                                                    };
+                                                }
+                                                Err(err) => {
+                                                    self.status_line = err;
+                                                }
+                                            }
+                                        }
+                                        ui.separator();
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("-")
+                                                        .color(theme::MUTED)
+                                                        .size(14.0),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .on_hover_text("Delete active request")
+                                            .cursor_hand()
+                                            .clicked()
+                                        {
+                                            self.delete_selected_endpoint();
+                                        }
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("+")
+                                                        .color(super::theme::ACCENT)
+                                                        .size(16.0),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .on_hover_text("New request tab")
+                                            .cursor_hand()
+                                            .clicked()
+                                        {
+                                            self.add_endpoint();
+                                        }
+                                    },
+                                );
+                            },
+                        );
                     });
-                });
 
                 ui.separator();
 
