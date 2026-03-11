@@ -125,6 +125,11 @@ Artifacts are written to `dist/packager`.
 
 Mailman stores local app data in OS-appropriate user data directories (via `directories::ProjectDirs`).
 
+Roughly, that resolves to paths like:
+- macOS: `~/Library/Application Support/com.mailman.mailman/`
+- Windows: `C:\Users\{YourUserName}\AppData\Local\com\mailman\mailman\data\`
+- Linux: `~/.local/share/mailman/mailman/` or `$XDG_DATA_HOME/mailman/mailman/`
+
 Stored data includes:
 - Saved request definitions
 - Persisted request tabs and per-tab draft state
