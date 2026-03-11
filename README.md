@@ -1,10 +1,23 @@
 # Mailman
 
-A lightweight, offline-first API client for people who want a Postman-style workflow without cloud lock-in.
+A lightweight, offline-first desktop API client for developers who want a Postman-style workflow without cloud lock-in.
 
-No account wall. No surprise workspace limits. No background sync you did not ask for.
+No account wall. No forced sync. No surprise workspace limits.
 
-Mailman is built for developers who just want to send requests, manage environments securely, and keep full control of local data.
+Mailman is built for people who just want to send requests, manage environments securely, and keep full control of local data.
+
+## Overview
+
+- Local-first desktop API client
+- Persistent request tabs with per-tab drafts
+- Encrypted environments with a master password
+- Optional OS-keychain-backed session persistence
+- Postman import plus encrypted Mailman bundle export/import
+- Cross-platform target: macOS, Windows, Linux
+
+## Screenshots
+
+UI screenshots and short workflow demos are coming soon.
 
 ## Why This Exists
 
@@ -18,26 +31,26 @@ Mailman is a simple alternative:
 
 ## Core Features
 
+- Persistent request tabs restored on launch
+- Draft-based request editing, with unsaved changes retained per tab until you save
 - Request builder with common HTTP methods (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, etc.)
 - Body modes: `none`, `raw`, `urlencoded`, `form-data`, `binary`
 - Environment variables with placeholder support (`${token}`, `${api_host}`)
 - Postman placeholder compatibility (`{{token}}` is normalized on import)
-- One-click cURL copy for selected request
-- Response viewer with status, timing, headers, and body
+- Response scripts that extract JSON values from 2xx responses into environment variables
+- Response viewer with status, timing, headers, raw body, and pretty JSON rendering
+- One-click cURL copy for the active request
 - Encrypted environment files using Argon2id + XChaCha20-Poly1305
-- Postman import from collection/environment exports, cache/leveldb, and requester logs (workspace-aware)
-- Password-protected bundle export/import for moving workspaces across machines/OSes
-
-## In One Line
-
-Mailman is the practical API workbench for developers who prefer local files over cloud dashboards.
+- Optional "Keep me signed in" sessions backed by the OS keychain, plus a manual lock action
+- Postman import from collection/environment exports, cache/LevelDB, and requester logs with optional workspace filtering
+- Password-protected bundle export/import for moving or backing up workspaces across machines
 
 ## Notable Guarantees
 
-- Offline-first app behavior (no account required)
+- Offline-first desktop app behavior (no account required)
 - No built-in cloud sync
-- Master password is not stored
-- If master password is lost, encrypted environment values cannot be recovered
+- Master password itself is never stored
+- If the master password is lost, encrypted environment values cannot be recovered
 
 ## Quick Start
 
@@ -47,6 +60,8 @@ Mailman is the practical API workbench for developers who prefer local files ove
 - `cargo`
 
 ### Run (Dev)
+
+Mailman is a desktop GUI app, so the normal development entry point is:
 
 ```bash
 cargo run
@@ -59,15 +74,14 @@ cargo build --release
 ./target/release/mailman
 ```
 
-## Packaging Installers (Tauri Bundler Ecosystem)
+## Packaging Installers (`cargo-packager`)
 
-This repo is pre-configured for `cargo-packager` via `Cargo.toml` (`[package.metadata.packager]`)
-to produce:
+This repo is pre-configured for `cargo-packager` via `Cargo.toml` (`[package.metadata.packager]`) to produce:
 - macOS: `.app` and `.dmg`
 - Linux: `.deb`
 - Windows: `.msi` and `.exe` (NSIS)
 
-### 1. Install packager CLI
+### 1. Install the packager CLI
 
 ```bash
 cargo install cargo-packager --locked
@@ -104,16 +118,18 @@ Artifacts are written to `dist/packager`.
 - Environment variable files are encrypted at rest.
 - Key derivation uses Argon2id.
 - Encryption uses XChaCha20-Poly1305.
-- A verifier is stored only to validate unlock attempts, not to recover passwords.
+- An encrypted verifier is stored only to validate unlock attempts, not to recover passwords.
+- If session persistence is enabled, only the derived unlock key is cached in the OS keychain for the selected duration. The raw password is not stored.
 
 ## Data Storage
 
 Mailman stores local app data in OS-appropriate user data directories (via `directories::ProjectDirs`).
 
 Stored data includes:
-- Request definitions
+- Saved request definitions
+- Persisted request tabs and per-tab draft state
 - Encrypted environment files
-- App config and selection state
+- App config, selection state, and workspace UI state
 - Security metadata (salt + encrypted verifier)
 
 ## Postman Import
@@ -121,23 +137,13 @@ Stored data includes:
 You can import from:
 - Default Postman directories (auto mode)
 - A custom path
-- A specific workspace name filter (optional)
+- An optional workspace name filter
 
 Mailman attempts to merge imported data intelligently:
 - Deduplicates requests using source metadata and request identity
-- Merges missing headers/details into existing entries
+- Preserves collection and folder context where available
+- Merges missing headers and request details into existing entries
 - Merges environment variables without overwriting existing keys by default
-
-## Project Goals
-
-- Keep the app fast and small
-- Preserve local ownership of API tooling data
-- Stay dependency-pragmatic and maintainable
-- Remain a practical daily driver for common API workflows
-
-## Status
-
-Active project. Core request workflow, encryption, and Postman migration paths are implemented.
 
 ## Contributing
 
@@ -148,17 +154,3 @@ If you open an issue, include:
 - Steps to reproduce
 - Expected vs actual behavior
 - Logs or screenshots if relevant
-
-## FAQ
-
-### Is this a Postman fork?
-
-No. Mailman is an independent project and is not affiliated with Postman.
-
-### Does this replace every Postman feature?
-
-No. It focuses on the core request-and-environment workflow with local security and migration support.
-
-### Can I use this fully offline?
-
-Yes for app behavior and data management. Network is only used when you send requests to your own APIs.
