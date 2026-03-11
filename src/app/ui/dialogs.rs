@@ -5,7 +5,7 @@ use eframe::egui::{self, RichText, TextEdit};
 use crate::app::MailmanApp;
 use crate::domain::non_empty_trimmed;
 
-use super::shared::{attach_text_context_menu, HandCursor};
+use super::shared::{HandCursor, attach_text_context_menu};
 use super::theme;
 
 impl MailmanApp {
@@ -219,11 +219,7 @@ impl MailmanApp {
                             .desired_width(f32::INFINITY)
                             .hint_text("optional"),
                     );
-                    attach_text_context_menu(
-                        &response,
-                        &self.postman_workspace_filter,
-                        true,
-                    );
+                    attach_text_context_menu(&response, &self.postman_workspace_filter, true);
                 });
                 ui.add_space(4.0);
 

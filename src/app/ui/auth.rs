@@ -2,7 +2,7 @@ use eframe::egui::{self, Color32, RichText, TextEdit};
 
 use crate::app::{AppPhase, MailmanApp};
 
-use super::shared::{attach_text_context_menu, HandCursor};
+use super::shared::{HandCursor, attach_text_context_menu};
 use super::theme;
 
 const LOGO_BYTES: &[u8] = include_bytes!("../../../assets/icons/128x128@2x.png");
@@ -39,7 +39,12 @@ impl MailmanApp {
                 let frame_resp = egui::Frame::default()
                     .inner_margin(egui::Margin::same(28))
                     // Flat top so the accent strip above sits flush; only bottom corners rounded
-                    .corner_radius(egui::CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 })
+                    .corner_radius(egui::CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: 12,
+                        se: 12,
+                    })
                     .fill(ui.visuals().faint_bg_color)
                     .stroke(egui::Stroke::new(
                         1.0,
@@ -64,16 +69,24 @@ impl MailmanApp {
                             {
                                 let font = egui::FontId::proportional(22.0);
                                 let mut job = egui::text::LayoutJob::default();
-                                job.append("Mail", 0.0, egui::text::TextFormat {
-                                    font_id: font.clone(),
-                                    color: ui.visuals().strong_text_color(),
-                                    ..Default::default()
-                                });
-                                job.append("man", 0.0, egui::text::TextFormat {
-                                    font_id: font,
-                                    color: ui.visuals().text_color(),
-                                    ..Default::default()
-                                });
+                                job.append(
+                                    "Mail",
+                                    0.0,
+                                    egui::text::TextFormat {
+                                        font_id: font.clone(),
+                                        color: ui.visuals().strong_text_color(),
+                                        ..Default::default()
+                                    },
+                                );
+                                job.append(
+                                    "man",
+                                    0.0,
+                                    egui::text::TextFormat {
+                                        font_id: font,
+                                        color: ui.visuals().text_color(),
+                                        ..Default::default()
+                                    },
+                                );
                                 ui.label(job);
                             }
                             ui.add_space(3.0);
@@ -136,9 +149,8 @@ impl MailmanApp {
                                     ui.horizontal(|ui| {
                                         let btn_w = ui.available_width();
                                         let btn = egui::Button::new(
-                                            RichText::new("Configuring…").color(
-                                                Color32::from_white_alpha(120),
-                                            ),
+                                            RichText::new("Configuring…")
+                                                .color(Color32::from_white_alpha(120)),
                                         )
                                         .fill(theme::ACCENT.gamma_multiply(0.5))
                                         .min_size(egui::vec2(btn_w, 32.0));
@@ -186,8 +198,14 @@ impl MailmanApp {
                                 ui.add_space(10.0);
 
                                 // ── Session duration picker ──────────────────
-                                const LABELS: [&str; 6] =
-                                    ["Always ask", "1 day", "7 days", "14 days", "30 days", "Forever"];
+                                const LABELS: [&str; 6] = [
+                                    "Always ask",
+                                    "1 day",
+                                    "7 days",
+                                    "14 days",
+                                    "30 days",
+                                    "Forever",
+                                ];
                                 const VALUES: [Option<u32>; 6] =
                                     [None, Some(1), Some(7), Some(14), Some(30), Some(0)];
 
@@ -265,7 +283,12 @@ impl MailmanApp {
                 let card_rect = frame_resp.response.rect;
                 ui.painter().rect_filled(
                     egui::Rect::from_min_size(card_rect.min, egui::vec2(card_rect.width(), 5.0)),
-                    egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 },
+                    egui::CornerRadius {
+                        nw: 6,
+                        ne: 6,
+                        sw: 0,
+                        se: 0,
+                    },
                     theme::ACCENT,
                 );
 

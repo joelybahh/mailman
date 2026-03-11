@@ -1,8 +1,9 @@
 use eframe::egui::{self, RichText};
 
-use crate::app::{MailmanApp, ResponseViewTab};
+use crate::app::MailmanApp;
+use crate::models::ResponseViewTab;
 
-use super::shared::{render_json_tree, HandCursor};
+use super::shared::{HandCursor, render_json_tree};
 use super::theme;
 
 impl MailmanApp {
@@ -16,57 +17,86 @@ impl MailmanApp {
             .show(ctx, |ui| {
                 ui.add_space(4.0);
 
-                // ── Status header ─────────────────────────────────────────────
+                let Some(index) = self.active_request_tab_index() else {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Response").strong().size(14.0));
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("No active request tab.")
+                                .color(theme::MUTED)
+                                .italics()
+                                .size(13.0),
+                        );
+                    });
+                    return;
+                };
+
+                let response_snapshot = self.open_request_tabs[index].response.clone();
+                let scripts_ran = self.open_request_tabs[index].scripts_ran;
+                let response_raw_chunks = self.open_request_tabs[index].response_raw_chunks.clone();
+                let parsed_response_json =
+                    self.open_request_tabs[index].parsed_response_json.clone();
+                let parsed_response_json_error = self.open_request_tabs[index]
+                    .parsed_response_json_error
+                    .clone();
+                let mut response_view_tab = self.open_request_tabs[index].response_view_tab;
+
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Response").strong().size(14.0));
-                    if let Some(status_code) = self.response.status_code {
+                    if let Some(status_code) = response_snapshot.status_code {
                         let color = theme::status_code_color(status_code);
                         ui.add_space(6.0);
                         egui::Frame::default()
                             .corner_radius(egui::CornerRadius::same(4))
                             .fill(color.gamma_multiply(0.18))
-                            .inner_margin(egui::Margin { left: 6, right: 6, top: 1, bottom: 1 })
+                            .inner_margin(egui::Margin {
+                                left: 6,
+                                right: 6,
+                                top: 1,
+                                bottom: 1,
+                            })
                             .show(ui, |ui| {
                                 ui.label(
                                     RichText::new(format!(
                                         "{} {}",
-                                        status_code, self.response.status_text
+                                        status_code, response_snapshot.status_text
                                     ))
                                     .strong()
                                     .size(12.0)
                                     .color(color),
                                 );
                             });
-                        if let Some(duration) = self.response.duration_ms {
+                        if let Some(duration) = response_snapshot.duration_ms {
                             ui.label(
                                 RichText::new(format!("{duration} ms"))
                                     .color(theme::MUTED)
                                     .size(12.0),
                             );
                         }
-                        if self.scripts_ran > 0 {
+                        if scripts_ran > 0 {
                             ui.add_space(4.0);
                             egui::Frame::default()
                                 .corner_radius(egui::CornerRadius::same(4))
                                 .fill(theme::ACCENT.gamma_multiply(0.15))
-                                .inner_margin(egui::Margin { left: 6, right: 6, top: 1, bottom: 1 })
+                                .inner_margin(egui::Margin {
+                                    left: 6,
+                                    right: 6,
+                                    top: 1,
+                                    bottom: 1,
+                                })
                                 .show(ui, |ui| {
-                                    let label = if self.scripts_ran == 1 {
+                                    let label = if scripts_ran == 1 {
                                         "1 script ran".to_owned()
                                     } else {
-                                        format!("{} scripts ran", self.scripts_ran)
+                                        format!("{scripts_ran} scripts ran")
                                     };
-                                    ui.label(
-                                        RichText::new(label)
-                                            .size(12.0)
-                                            .color(theme::ACCENT),
-                                    );
+                                    ui.label(RichText::new(label).size(12.0).color(theme::ACCENT));
                                 });
                         }
-                    } else if !self.response.status_text.is_empty() {
+                    } else if !response_snapshot.status_text.is_empty() {
                         ui.add_space(6.0);
                         ui.label(
-                            RichText::new(&self.response.status_text)
+                            RichText::new(&response_snapshot.status_text)
                                 .color(theme::MUTED)
                                 .italics()
                                 .size(13.0),
@@ -74,32 +104,21 @@ impl MailmanApp {
                     }
                 });
 
-                // ── Tab bar ───────────────────────────────────────────────────
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.response_view_tab, ResponseViewTab::Raw, "Raw")
+                    ui.selectable_value(&mut response_view_tab, ResponseViewTab::Raw, "Raw")
                         .cursor_hand();
-                    ui.selectable_value(
-                        &mut self.response_view_tab,
-                        ResponseViewTab::Pretty,
-                        "Pretty",
-                    )
-                    .cursor_hand();
+                    ui.selectable_value(&mut response_view_tab, ResponseViewTab::Pretty, "Pretty")
+                        .cursor_hand();
                 });
                 ui.separator();
 
-                // ── Error banner (both tabs) ──────────────────────────────────
-                if let Some(error) = &self.response.error.clone() {
+                if let Some(error) = &response_snapshot.error {
                     ui.colored_label(theme::ERROR, error);
                 }
 
-                // ── Tab bodies ────────────────────────────────────────────────
-                match self.response_view_tab {
+                match response_view_tab {
                     ResponseViewTab::Raw => {
-                        // Virtual line-by-line scroll. egui's TextEdit computes
-                        // a full galley layout for every character on every frame,
-                        // which hangs on large payloads. show_rows only renders
-                        // the visible lines → O(visible_lines) not O(total_chars).
-                        if self.response_raw_chunks.is_empty() {
+                        if response_raw_chunks.is_empty() {
                             ui.add_space(8.0);
                             ui.label(
                                 RichText::new("No response body.")
@@ -107,24 +126,17 @@ impl MailmanApp {
                                     .italics(),
                             );
                         } else {
-                            // response_raw_chunks is pre-computed once on
-                            // arrival. Long lines are split at token boundaries
-                            // (~400 chars each) so double-click word-boundary
-                            // search is O(chunk) not O(line_length).
-                            let chunk_count = self.response_raw_chunks.len();
-                            let line_h =
-                                ui.text_style_height(&egui::TextStyle::Monospace);
+                            let chunk_count = response_raw_chunks.len();
+                            let line_h = ui.text_style_height(&egui::TextStyle::Monospace);
                             let sb = ui.spacing().scroll.bar_outer_margin
                                 + ui.spacing().scroll.bar_width;
 
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false, false])
                                 .show_rows(ui, line_h, chunk_count, |ui, row_range| {
-                                    ui.set_max_width(
-                                        (ui.available_width() - sb).max(100.0),
-                                    );
+                                    ui.set_max_width((ui.available_width() - sb).max(100.0));
                                     for i in row_range {
-                                        if let Some(chunk) = self.response_raw_chunks.get(i) {
+                                        if let Some(chunk) = response_raw_chunks.get(i) {
                                             ui.add(
                                                 egui::Label::new(
                                                     RichText::new(chunk.as_str())
@@ -138,21 +150,20 @@ impl MailmanApp {
                                 });
                         }
                     }
-
                     ResponseViewTab::Pretty => {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                if !self.response.headers.is_empty() {
+                                if !response_snapshot.headers.is_empty() {
                                     ui.collapsing(
                                         RichText::new(format!(
                                             "Headers ({})",
-                                            self.response.headers.len()
+                                            response_snapshot.headers.len()
                                         ))
                                         .size(12.0)
                                         .color(theme::MUTED),
                                         |ui| {
-                                            for header in &self.response.headers {
+                                            for header in &response_snapshot.headers {
                                                 ui.horizontal(|ui| {
                                                     ui.label(
                                                         RichText::new(&header.key)
@@ -171,14 +182,14 @@ impl MailmanApp {
                                     ui.separator();
                                 }
 
-                                if let Some(value) = &self.parsed_response_json {
+                                if let Some(value) = &parsed_response_json {
                                     render_json_tree(ui, None, value, "$");
-                                } else if let Some(err) = &self.parsed_response_json_error {
+                                } else if let Some(err) = &parsed_response_json_error {
                                     ui.colored_label(
                                         theme::ERROR,
                                         format!("Not valid JSON: {err}"),
                                     );
-                                } else if self.response.body.trim().is_empty() {
+                                } else if response_snapshot.body.trim().is_empty() {
                                     ui.label(
                                         RichText::new("No response body.")
                                             .color(theme::MUTED)
@@ -194,6 +205,10 @@ impl MailmanApp {
                                 }
                             });
                     }
+                }
+
+                if let Some(tab) = self.active_request_tab_mut() {
+                    tab.response_view_tab = response_view_tab;
                 }
             });
     }

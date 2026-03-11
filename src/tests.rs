@@ -10,7 +10,10 @@ use crate::domain::{
     request_body_mode_from_data, request_headers_from_data, request_url_from_data,
     resolve_endpoint_url, resolve_placeholders, serialize_workspace_bundle,
 };
-use crate::models::{Endpoint, KeyValue, SharedEnvironment, SharedWorkspacePayload};
+use crate::models::{
+    Endpoint, KeyValue, PersistedRequestTab, RequestEditorTab, ResponseState, ResponseViewTab,
+    SharedEnvironment, SharedWorkspacePayload, WorkspaceUiState,
+};
 use crate::request_body::{
     computed_default_content_length, default_content_type_for_mode, normalize_body_mode,
     parse_body_fields, should_add_default_content_type,
@@ -42,6 +45,7 @@ fn normalize_endpoint_url_and_query_params_splits_existing_url_query() {
         headers: vec![],
         body_mode: "none".to_owned(),
         body: String::new(),
+        scripts: vec![],
     };
 
     normalize_endpoint_url_and_query_params(&mut endpoint);
@@ -79,6 +83,7 @@ fn resolve_endpoint_url_appends_params_with_placeholders() {
         headers: vec![],
         body_mode: "none".to_owned(),
         body: String::new(),
+        scripts: vec![],
     };
 
     let mut env = BTreeMap::new();
@@ -234,6 +239,7 @@ fn build_curl_command_resolves_env_and_quotes_values() {
         ],
         body_mode: "raw".to_owned(),
         body: "{\"name\":\"${name}\"}".to_owned(),
+        scripts: vec![],
     };
 
     let mut vars = BTreeMap::new();
@@ -270,6 +276,7 @@ fn execute_request_rejects_invalid_header_name_with_clear_error() {
         }],
         body_mode: "none".to_owned(),
         body: String::new(),
+        scripts: vec![],
     };
 
     let output = execute_request(endpoint, BTreeMap::new());
@@ -433,6 +440,7 @@ fn build_curl_command_uses_form_flag_for_form_data_mode() {
         headers: vec![],
         body_mode: "form-data".to_owned(),
         body: "name=joel\nfile=@/tmp/payload.bin".to_owned(),
+        scripts: vec![],
     };
     let curl = build_curl_command(&endpoint, &BTreeMap::new());
 
@@ -528,6 +536,7 @@ fn workspace_bundle_roundtrip_preserves_requests_and_environments() {
             headers: vec![],
             body_mode: "none".to_owned(),
             body: String::new(),
+            scripts: vec![],
         }],
         environments: vec![SharedEnvironment {
             name: "dev".to_owned(),
@@ -567,4 +576,57 @@ fn workspace_bundle_rejects_wrong_password() {
         err.contains("decryption failed") || err.contains("password"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn workspace_ui_state_roundtrip_preserves_open_tabs() {
+    let state = WorkspaceUiState {
+        active_tab_id: Some("tab-1".to_owned()),
+        open_tabs: vec![PersistedRequestTab {
+            id: "tab-1".to_owned(),
+            saved_endpoint_id: Some("ep-1".to_owned()),
+            draft: Endpoint {
+                id: "ep-1".to_owned(),
+                source_request_id: String::new(),
+                source_collection_id: String::new(),
+                source_folder_id: String::new(),
+                name: "Users".to_owned(),
+                collection: "Core".to_owned(),
+                folder_path: "Admin".to_owned(),
+                method: "GET".to_owned(),
+                url: "https://example.com/users".to_owned(),
+                query_params: vec![],
+                headers: vec![],
+                body_mode: "none".to_owned(),
+                body: String::new(),
+                scripts: vec![],
+            },
+            is_dirty: true,
+            editor_tab: RequestEditorTab::Headers,
+            response_view_tab: ResponseViewTab::Pretty,
+            response: ResponseState {
+                status_code: Some(200),
+                status_text: "OK".to_owned(),
+                duration_ms: Some(12),
+                headers: vec![KeyValue {
+                    key: "Content-Type".to_owned(),
+                    value: "application/json".to_owned(),
+                }],
+                body: "{\"ok\":true}".to_owned(),
+                error: None,
+            },
+            scripts_ran: 1,
+        }],
+    };
+
+    let encoded = serde_json::to_string(&state).expect("workspace ui should serialize");
+    let decoded: WorkspaceUiState =
+        serde_json::from_str(&encoded).expect("workspace ui should deserialize");
+
+    assert_eq!(decoded.active_tab_id.as_deref(), Some("tab-1"));
+    assert_eq!(decoded.open_tabs.len(), 1);
+    assert!(decoded.open_tabs[0].is_dirty);
+    assert_eq!(decoded.open_tabs[0].editor_tab, RequestEditorTab::Headers);
+    assert_eq!(decoded.open_tabs[0].response.status_code, Some(200));
+    assert_eq!(decoded.open_tabs[0].scripts_ran, 1);
 }

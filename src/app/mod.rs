@@ -19,14 +19,18 @@ use crate::domain::{
     serialize_workspace_bundle, verify_password,
 };
 use crate::models::{
-    AppConfig, Endpoint, Environment, EnvironmentIndexEntry, KeyMaterial, KeyValue, ResponseState,
-    SecurityMetadata, SharedEnvironment, SharedWorkspacePayload,
+    AppConfig, Endpoint, Environment, EnvironmentIndexEntry, KeyMaterial, KeyValue,
+    PersistedRequestTab, RequestEditorTab, ResponseState, ResponseViewTab, SecurityMetadata,
+    SharedEnvironment, SharedWorkspacePayload, WorkspaceUiState,
 };
 use crate::request_body::normalize_body_mode_owned;
 use crate::storage::{AppStorage, CoreData};
 
 pub(in crate::app) enum AuthResult {
-    SetupOk { metadata: SecurityMetadata, key: KeyMaterial },
+    SetupOk {
+        metadata: SecurityMetadata,
+        key: KeyMaterial,
+    },
     UnlockOk(KeyMaterial),
     Err(String),
 }
@@ -38,18 +42,104 @@ pub(in crate::app) enum AppPhase {
     Ready,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::app) enum RequestEditorTab {
-    Params,
-    Headers,
-    Body,
-    Scripts,
+#[derive(Clone, Debug)]
+pub(in crate::app) struct RequestTab {
+    pub(in crate::app) id: String,
+    pub(in crate::app) saved_endpoint_id: Option<String>,
+    pub(in crate::app) draft: Endpoint,
+    pub(in crate::app) is_dirty: bool,
+    pub(in crate::app) editor_tab: RequestEditorTab,
+    pub(in crate::app) response_view_tab: ResponseViewTab,
+    pub(in crate::app) response: ResponseState,
+    pub(in crate::app) response_raw_chunks: Vec<String>,
+    pub(in crate::app) parsed_response_json: Option<serde_json::Value>,
+    pub(in crate::app) parsed_response_json_error: Option<String>,
+    pub(in crate::app) scripts_ran: usize,
+    pub(in crate::app) inflight_environment_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::app) enum ResponseViewTab {
-    Raw,
-    Pretty,
+impl RequestTab {
+    fn from_saved(endpoint: Endpoint) -> Self {
+        Self::from_persisted(PersistedRequestTab {
+            id: create_id("tab"),
+            saved_endpoint_id: Some(endpoint.id.clone()),
+            draft: endpoint,
+            is_dirty: false,
+            editor_tab: RequestEditorTab::Params,
+            response_view_tab: ResponseViewTab::Pretty,
+            response: ResponseState::default(),
+            scripts_ran: 0,
+        })
+    }
+
+    fn from_persisted(tab: PersistedRequestTab) -> Self {
+        let mut runtime = Self {
+            id: tab.id,
+            saved_endpoint_id: tab.saved_endpoint_id,
+            draft: tab.draft,
+            is_dirty: tab.is_dirty,
+            editor_tab: tab.editor_tab,
+            response_view_tab: tab.response_view_tab,
+            response: tab.response,
+            response_raw_chunks: Vec::new(),
+            parsed_response_json: None,
+            parsed_response_json_error: None,
+            scripts_ran: tab.scripts_ran,
+            inflight_environment_id: None,
+        };
+        runtime.rebuild_response_caches();
+        runtime
+    }
+
+    fn to_persisted(&self) -> PersistedRequestTab {
+        PersistedRequestTab {
+            id: self.id.clone(),
+            saved_endpoint_id: self.saved_endpoint_id.clone(),
+            draft: self.draft.clone(),
+            is_dirty: self.is_dirty,
+            editor_tab: self.editor_tab,
+            response_view_tab: self.response_view_tab,
+            response: self.response.clone(),
+            scripts_ran: self.scripts_ran,
+        }
+    }
+
+    fn rebuild_response_caches(&mut self) {
+        self.response_raw_chunks = chunk_response_body(&self.response.body);
+        if self.response.body.trim().is_empty() {
+            self.parsed_response_json = None;
+            self.parsed_response_json_error = None;
+            return;
+        }
+
+        match serde_json::from_str::<serde_json::Value>(self.response.body.trim()) {
+            Ok(value) => {
+                self.parsed_response_json = Some(value);
+                self.parsed_response_json_error = None;
+            }
+            Err(err) => {
+                self.parsed_response_json = None;
+                self.parsed_response_json_error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn clear_for_request_switch(&mut self) {
+        self.response = ResponseState::default();
+        self.response_raw_chunks.clear();
+        self.parsed_response_json = None;
+        self.parsed_response_json_error = None;
+        self.scripts_ran = 0;
+        self.inflight_environment_id = None;
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::app) enum PendingRequestAction {
+    CloseTab { tab_id: String },
+    CloseAll,
+    DeleteActive,
+    DeleteAll,
 }
 
 pub(crate) struct MailmanApp {
@@ -58,11 +148,12 @@ pub(crate) struct MailmanApp {
     pub(in crate::app) security_metadata: Option<SecurityMetadata>,
     pub(in crate::app) key_material: Option<KeyMaterial>,
 
-    pub(in crate::app) endpoints: Vec<Endpoint>,
+    pub(in crate::app) saved_endpoints: Vec<Endpoint>,
+    pub(in crate::app) open_request_tabs: Vec<RequestTab>,
     pub(in crate::app) pending_environment_index: Vec<EnvironmentIndexEntry>,
     pub(in crate::app) environments: Vec<Environment>,
 
-    pub(in crate::app) selected_endpoint_id: Option<String>,
+    pub(in crate::app) active_request_tab_id: Option<String>,
     pub(in crate::app) selected_environment_id: Option<String>,
     pub(in crate::app) config: AppConfig,
 
@@ -71,20 +162,13 @@ pub(crate) struct MailmanApp {
     pub(in crate::app) unlock_password: String,
     pub(in crate::app) auth_message: String,
 
-    pub(in crate::app) response: ResponseState,
-    pub(in crate::app) response_body_view: String,
-    /// Pre-chunked lines for the Raw view. Long lines are split at token
-    /// boundaries so each label stays under ~400 chars, making egui's
-    /// double-click word-boundary scan instant regardless of response size.
-    pub(in crate::app) response_raw_chunks: Vec<String>,
-    pub(in crate::app) parsed_response_json: Option<serde_json::Value>,
-    pub(in crate::app) parsed_response_json_error: Option<String>,
-    pub(in crate::app) response_view_tab: ResponseViewTab,
     pub(in crate::app) status_line: String,
     pub(in crate::app) dirty: bool,
     pub(in crate::app) last_mutation: Instant,
-    pub(in crate::app) in_flight: bool,
-    pub(in crate::app) response_rx: Option<Receiver<ResponseState>>,
+    pub(in crate::app) workspace_ui_dirty: bool,
+    pub(in crate::app) workspace_ui_last_mutation: Instant,
+    pub(in crate::app) in_flight_tab_id: Option<String>,
+    pub(in crate::app) response_rx: Option<Receiver<(String, ResponseState)>>,
 
     pub(in crate::app) auth_pending: bool,
     pub(in crate::app) auth_rx: Option<Receiver<AuthResult>>,
@@ -93,7 +177,6 @@ pub(crate) struct MailmanApp {
     pub(in crate::app) postman_import_path: String,
     pub(in crate::app) postman_workspace_filter: String,
     pub(in crate::app) show_environment_panel: bool,
-    pub(in crate::app) confirm_delete_all_requests: bool,
     pub(in crate::app) show_export_bundle_dialog: bool,
     pub(in crate::app) export_bundle_password: String,
     pub(in crate::app) export_bundle_password_confirm: String,
@@ -101,19 +184,15 @@ pub(crate) struct MailmanApp {
     pub(in crate::app) show_import_bundle_dialog: bool,
     pub(in crate::app) import_bundle_path: Option<PathBuf>,
     pub(in crate::app) import_bundle_password: String,
-    pub(in crate::app) request_editor_tab: RequestEditorTab,
     pub(in crate::app) logo_texture: Option<egui::TextureHandle>,
     /// Set to `true` on startup; the sidebar uses it to auto-expand the
     /// collection/folder containing the selected endpoint on first render,
     /// then resets it to `false`.
     pub(in crate::app) expand_to_selection: bool,
-    /// Number of script rules that successfully ran against the last response.
-    /// Reset to 0 on each new request.
-    pub(in crate::app) scripts_ran: usize,
-    /// The environment ID that was active when the current request was sent.
-    /// Scripts always write to this environment, regardless of any mid-flight
-    /// environment switch in the toolbar.
-    pub(in crate::app) inflight_environment_id: Option<String>,
+    pub(in crate::app) dragging_tab_id: Option<String>,
+    pub(in crate::app) rename_tab_id: Option<String>,
+    pub(in crate::app) rename_buffer: String,
+    pub(in crate::app) pending_request_action: Option<PendingRequestAction>,
 }
 
 impl MailmanApp {
@@ -148,31 +227,44 @@ impl MailmanApp {
             AppPhase::SetupPassword
         };
 
+        let saved_endpoints = core_data.endpoints;
+        let workspace_ui = match storage.load_workspace_ui() {
+            Ok(workspace_ui) => workspace_ui,
+            Err(err) => {
+                if status_line.is_empty() {
+                    status_line = format!("Failed to read tab workspace: {err}");
+                }
+                None
+            }
+        };
+        let (open_request_tabs, active_request_tab_id) = Self::restore_request_tabs(
+            &saved_endpoints,
+            workspace_ui,
+            core_data.config.selected_endpoint_id.clone(),
+        );
+
         let mut app = Self {
             storage,
             phase,
             security_metadata,
             key_material: None,
-            endpoints: core_data.endpoints,
+            saved_endpoints,
+            open_request_tabs,
             pending_environment_index: core_data.environment_index,
             environments: vec![],
-            selected_endpoint_id: core_data.config.selected_endpoint_id.clone(),
+            active_request_tab_id,
             selected_environment_id: core_data.config.selected_environment_id.clone(),
             config: core_data.config,
             setup_password: String::new(),
             setup_password_confirm: String::new(),
             unlock_password: String::new(),
             auth_message: String::new(),
-            response: ResponseState::default(),
-            response_body_view: String::new(),
-            response_raw_chunks: Vec::new(),
-            parsed_response_json: None,
-            parsed_response_json_error: None,
-            response_view_tab: ResponseViewTab::Pretty,
             status_line,
             dirty: false,
             last_mutation: Instant::now(),
-            in_flight: false,
+            workspace_ui_dirty: false,
+            workspace_ui_last_mutation: Instant::now(),
+            in_flight_tab_id: None,
             response_rx: None,
             auth_pending: false,
             auth_rx: None,
@@ -180,7 +272,6 @@ impl MailmanApp {
             postman_import_path: String::new(),
             postman_workspace_filter: String::new(),
             show_environment_panel: false,
-            confirm_delete_all_requests: false,
             show_export_bundle_dialog: false,
             export_bundle_password: String::new(),
             export_bundle_password_confirm: String::new(),
@@ -188,20 +279,88 @@ impl MailmanApp {
             show_import_bundle_dialog: false,
             import_bundle_path: None,
             import_bundle_password: String::new(),
-            request_editor_tab: RequestEditorTab::Params,
             logo_texture: None,
             expand_to_selection: true,
-            scripts_ran: 0,
-            inflight_environment_id: None,
+            dragging_tab_id: None,
+            rename_tab_id: None,
+            rename_buffer: String::new(),
+            pending_request_action: None,
         };
 
         app.try_auto_session_unlock();
         app
     }
 
+    fn restore_request_tabs(
+        saved_endpoints: &[Endpoint],
+        workspace_ui: Option<WorkspaceUiState>,
+        legacy_selected_endpoint_id: Option<String>,
+    ) -> (Vec<RequestTab>, Option<String>) {
+        let saved_by_id = saved_endpoints
+            .iter()
+            .map(|endpoint| (endpoint.id.clone(), endpoint))
+            .collect::<BTreeMap<_, _>>();
+
+        if let Some(workspace_ui) = workspace_ui {
+            let mut tabs = Vec::new();
+            for persisted in workspace_ui.open_tabs {
+                if !persisted.is_dirty
+                    && let Some(saved_id) = persisted.saved_endpoint_id.as_ref()
+                    && !saved_by_id.contains_key(saved_id)
+                {
+                    continue;
+                }
+
+                let mut persisted = persisted;
+                if !persisted.is_dirty
+                    && let Some(saved_id) = persisted.saved_endpoint_id.as_ref()
+                    && let Some(saved_endpoint) = saved_by_id.get(saved_id)
+                {
+                    persisted.draft = (*saved_endpoint).clone();
+                }
+                tabs.push(RequestTab::from_persisted(persisted));
+            }
+
+            if tabs.is_empty() {
+                return Self::fallback_request_tabs(saved_endpoints, legacy_selected_endpoint_id);
+            }
+
+            let active_tab_id = workspace_ui
+                .active_tab_id
+                .filter(|id| tabs.iter().any(|tab| &tab.id == id))
+                .or_else(|| tabs.first().map(|tab| tab.id.clone()));
+            return (tabs, active_tab_id);
+        }
+
+        Self::fallback_request_tabs(saved_endpoints, legacy_selected_endpoint_id)
+    }
+
+    fn fallback_request_tabs(
+        saved_endpoints: &[Endpoint],
+        legacy_selected_endpoint_id: Option<String>,
+    ) -> (Vec<RequestTab>, Option<String>) {
+        let fallback_endpoint = legacy_selected_endpoint_id
+            .as_ref()
+            .and_then(|id| saved_endpoints.iter().find(|endpoint| &endpoint.id == id))
+            .cloned()
+            .or_else(|| saved_endpoints.first().cloned());
+
+        let tabs = fallback_endpoint
+            .map(RequestTab::from_saved)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let active_tab_id = tabs.first().map(|tab| tab.id.clone());
+        (tabs, active_tab_id)
+    }
+
     pub(in crate::app) fn mark_dirty(&mut self) {
         self.dirty = true;
         self.last_mutation = Instant::now();
+    }
+
+    pub(in crate::app) fn mark_workspace_ui_dirty(&mut self) {
+        self.workspace_ui_dirty = true;
+        self.workspace_ui_last_mutation = Instant::now();
     }
 
     pub(in crate::app) fn lock_workspace(&mut self) {
@@ -213,14 +372,10 @@ impl MailmanApp {
         // consumed after locking. This prevents a pre-lock response (and any
         // scripts it would trigger) from mutating state in the next session.
         self.response_rx = None;
-        self.in_flight = false;
-        self.response = ResponseState::default();
-        self.response_body_view.clear();
-        self.response_raw_chunks.clear();
-        self.parsed_response_json = None;
-        self.parsed_response_json_error = None;
-        self.scripts_ran = 0;
-        self.inflight_environment_id = None;
+        self.in_flight_tab_id = None;
+        for tab in &mut self.open_request_tabs {
+            tab.clear_for_request_switch();
+        }
 
         // Remove the cached session key from the OS keychain and clear the
         // recorded expiry so the user must unlock again.
@@ -252,12 +407,12 @@ impl MailmanApp {
 
     pub(in crate::app) fn ensure_selected_ids(&mut self) {
         if self
-            .selected_endpoint_id
+            .active_request_tab_id
             .as_ref()
-            .and_then(|id| self.endpoints.iter().find(|item| &item.id == id))
+            .and_then(|id| self.open_request_tabs.iter().find(|tab| &tab.id == id))
             .is_none()
         {
-            self.set_selected_endpoint(self.endpoints.first().map(|item| item.id.clone()));
+            self.active_request_tab_id = self.open_request_tabs.first().map(|tab| tab.id.clone());
         }
 
         if self
@@ -278,20 +433,16 @@ impl MailmanApp {
             return;
         }
 
-        let Some(key) = self.key_material.as_ref() else {
-            self.status_line = "Cannot save: app is locked.".to_owned();
-            return;
-        };
-
-        self.config.selected_endpoint_id = self.selected_endpoint_id.clone();
         self.config.selected_environment_id = self.selected_environment_id.clone();
 
-        match self
-            .storage
-            .save_all(&self.endpoints, &self.environments, &self.config, key)
-        {
+        match self.storage.save_config(&self.config) {
             Ok(_) => {
-                self.status_line = format!("Saved to {}", self.storage.base_dir.display());
+                if let Some(key) = self.key_material.as_ref() {
+                    if let Err(err) = self.storage.save_environments(&self.environments, key) {
+                        self.status_line = format!("Save failed: {err}");
+                        return;
+                    }
+                }
                 self.dirty = false;
             }
             Err(err) => {
@@ -300,9 +451,55 @@ impl MailmanApp {
         }
     }
 
-    pub(in crate::app) fn selected_endpoint_index(&self) -> Option<usize> {
-        let selected = self.selected_endpoint_id.as_ref()?;
-        self.endpoints.iter().position(|item| &item.id == selected)
+    pub(in crate::app) fn try_auto_save_workspace_ui(&mut self) {
+        if self.phase != AppPhase::Ready || !self.workspace_ui_dirty {
+            return;
+        }
+        if self.workspace_ui_last_mutation.elapsed() < Duration::from_millis(350) {
+            return;
+        }
+
+        if let Err(err) = self
+            .storage
+            .save_workspace_ui(&self.current_workspace_ui_state())
+        {
+            self.status_line = format!("Failed to persist tabs: {err}");
+            return;
+        }
+
+        self.workspace_ui_dirty = false;
+    }
+
+    pub(in crate::app) fn current_workspace_ui_state(&self) -> WorkspaceUiState {
+        WorkspaceUiState {
+            active_tab_id: self.active_request_tab_id.clone(),
+            open_tabs: self
+                .open_request_tabs
+                .iter()
+                .map(RequestTab::to_persisted)
+                .collect(),
+        }
+    }
+
+    pub(in crate::app) fn active_request_tab_index(&self) -> Option<usize> {
+        let active = self.active_request_tab_id.as_ref()?;
+        self.open_request_tabs
+            .iter()
+            .position(|tab| &tab.id == active)
+    }
+
+    pub(in crate::app) fn active_request_tab(&self) -> Option<&RequestTab> {
+        self.active_request_tab_index()
+            .and_then(|index| self.open_request_tabs.get(index))
+    }
+
+    pub(in crate::app) fn active_request_tab_mut(&mut self) -> Option<&mut RequestTab> {
+        let index = self.active_request_tab_index()?;
+        self.open_request_tabs.get_mut(index)
+    }
+
+    pub(in crate::app) fn active_endpoint_id(&self) -> Option<&str> {
+        self.active_request_tab().map(|tab| tab.draft.id.as_str())
     }
 
     pub(in crate::app) fn selected_environment_index(&self) -> Option<usize> {
@@ -329,23 +526,272 @@ impl MailmanApp {
         variables
     }
 
-    pub(in crate::app) fn reset_response_ui_for_request_switch(&mut self) {
-        self.response = ResponseState::default();
-        self.response_body_view.clear();
-        self.response_raw_chunks.clear();
-        self.parsed_response_json = None;
-        self.parsed_response_json_error = None;
-        self.in_flight = false;
-        self.response_rx = None;
+    pub(in crate::app) fn is_request_in_flight(&self, tab_id: &str) -> bool {
+        self.in_flight_tab_id.as_deref() == Some(tab_id)
     }
 
-    pub(in crate::app) fn set_selected_endpoint(&mut self, endpoint_id: Option<String>) {
-        if self.selected_endpoint_id == endpoint_id {
+    pub(in crate::app) fn activate_request_tab(&mut self, tab_id: Option<String>) {
+        if self.active_request_tab_id == tab_id {
             return;
         }
 
-        self.selected_endpoint_id = endpoint_id;
-        self.reset_response_ui_for_request_switch();
+        self.active_request_tab_id = tab_id;
+        self.expand_to_selection = true;
+        self.mark_workspace_ui_dirty();
+    }
+
+    pub(in crate::app) fn open_saved_request_in_tab(&mut self, endpoint_id: &str) {
+        if let Some(tab) = self
+            .open_request_tabs
+            .iter()
+            .find(|tab| tab.saved_endpoint_id.as_deref() == Some(endpoint_id))
+        {
+            self.activate_request_tab(Some(tab.id.clone()));
+            return;
+        }
+
+        let Some(endpoint) = self
+            .saved_endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == endpoint_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let tab = RequestTab::from_saved(endpoint);
+        let tab_id = tab.id.clone();
+        self.open_request_tabs.push(tab);
+        self.activate_request_tab(Some(tab_id));
+        self.mark_workspace_ui_dirty();
+    }
+
+    pub(in crate::app) fn mark_active_request_dirty(&mut self) {
+        if let Some(tab) = self.active_request_tab_mut() {
+            tab.is_dirty = true;
+            normalize_endpoint_url_and_query_params(&mut tab.draft);
+        }
+        self.mark_workspace_ui_dirty();
+    }
+
+    pub(in crate::app) fn sync_clean_tabs_from_saved_endpoints(&mut self) {
+        let saved_by_id = self
+            .saved_endpoints
+            .iter()
+            .map(|endpoint| (endpoint.id.clone(), endpoint.clone()))
+            .collect::<BTreeMap<_, _>>();
+        self.open_request_tabs.retain(|tab| {
+            tab.is_dirty
+                || tab
+                    .saved_endpoint_id
+                    .as_ref()
+                    .map(|saved_id| saved_by_id.contains_key(saved_id))
+                    .unwrap_or(true)
+        });
+        for tab in &mut self.open_request_tabs {
+            if tab.is_dirty {
+                continue;
+            }
+            if let Some(saved_id) = tab.saved_endpoint_id.as_ref()
+                && let Some(saved_endpoint) = saved_by_id.get(saved_id)
+            {
+                tab.draft = saved_endpoint.clone();
+            }
+        }
+        self.ensure_selected_ids();
+    }
+
+    pub(in crate::app) fn save_request_tabs(
+        &mut self,
+        tab_ids: &[String],
+    ) -> Result<usize, String> {
+        if tab_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut changed = 0usize;
+        let mut saved_by_id = self
+            .saved_endpoints
+            .iter()
+            .enumerate()
+            .map(|(index, endpoint)| (endpoint.id.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+
+        for tab_id in tab_ids {
+            let Some(tab_index) = self
+                .open_request_tabs
+                .iter()
+                .position(|tab| &tab.id == tab_id)
+            else {
+                continue;
+            };
+
+            let tab = &mut self.open_request_tabs[tab_index];
+            normalize_endpoint_url_and_query_params(&mut tab.draft);
+
+            let endpoint = tab.draft.clone();
+            if let Some(saved_index) = saved_by_id.get(&endpoint.id).copied() {
+                self.saved_endpoints[saved_index] = endpoint.clone();
+            } else {
+                saved_by_id.insert(endpoint.id.clone(), self.saved_endpoints.len());
+                self.saved_endpoints.push(endpoint.clone());
+            }
+
+            tab.saved_endpoint_id = Some(endpoint.id.clone());
+            tab.is_dirty = false;
+            changed += 1;
+        }
+
+        self.saved_endpoints.sort_by(|left, right| {
+            (
+                left.collection.to_lowercase(),
+                left.folder_path.to_lowercase(),
+                left.name.to_lowercase(),
+            )
+                .cmp(&(
+                    right.collection.to_lowercase(),
+                    right.folder_path.to_lowercase(),
+                    right.name.to_lowercase(),
+                ))
+        });
+        self.sync_clean_tabs_from_saved_endpoints();
+        self.mark_workspace_ui_dirty();
+        self.storage
+            .save_requests(&self.saved_endpoints)
+            .map_err(|err| format!("Failed to save requests: {err}"))?;
+        self.storage
+            .save_workspace_ui(&self.current_workspace_ui_state())
+            .map_err(|err| format!("Failed to save tab workspace: {err}"))?;
+        self.workspace_ui_dirty = false;
+        Ok(changed)
+    }
+
+    pub(in crate::app) fn save_all_dirty_request_tabs(&mut self) -> Result<usize, String> {
+        let dirty_tab_ids = self
+            .open_request_tabs
+            .iter()
+            .filter(|tab| tab.is_dirty)
+            .map(|tab| tab.id.clone())
+            .collect::<Vec<_>>();
+        self.save_request_tabs(&dirty_tab_ids)
+    }
+
+    pub(in crate::app) fn move_request_tab(&mut self, tab_id: &str, target_index: usize) {
+        let Some(current_index) = self
+            .open_request_tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+        else {
+            return;
+        };
+        let bounded_target = target_index.min(self.open_request_tabs.len().saturating_sub(1));
+        if current_index == bounded_target {
+            return;
+        }
+
+        let tab = self.open_request_tabs.remove(current_index);
+        self.open_request_tabs.insert(bounded_target, tab);
+        self.mark_workspace_ui_dirty();
+    }
+
+    pub(in crate::app) fn close_all_saved_tabs(&mut self) {
+        let before = self.open_request_tabs.len();
+        self.open_request_tabs.retain(|tab| tab.is_dirty);
+        let closed = before.saturating_sub(self.open_request_tabs.len());
+        self.ensure_selected_ids();
+        self.mark_workspace_ui_dirty();
+        self.status_line = format!("Closed {closed} saved tabs.");
+    }
+
+    fn pending_request_action_target_tab_ids(&self) -> Vec<String> {
+        match self.pending_request_action.as_ref() {
+            Some(PendingRequestAction::CloseTab { tab_id }) => vec![tab_id.clone()],
+            Some(PendingRequestAction::CloseAll) | Some(PendingRequestAction::DeleteAll) => self
+                .open_request_tabs
+                .iter()
+                .map(|tab| tab.id.clone())
+                .collect(),
+            Some(PendingRequestAction::DeleteActive) => {
+                self.active_request_tab_id.clone().into_iter().collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    pub(in crate::app) fn pending_request_action_dirty_tab_ids(&self) -> Vec<String> {
+        let target_ids = self.pending_request_action_target_tab_ids();
+        self.open_request_tabs
+            .iter()
+            .filter(|tab| target_ids.iter().any(|id| id == &tab.id) && tab.is_dirty)
+            .map(|tab| tab.id.clone())
+            .collect()
+    }
+
+    fn persist_request_workspace_snapshot(&mut self) -> Result<(), String> {
+        self.storage
+            .save_requests(&self.saved_endpoints)
+            .map_err(|err| format!("Failed to save requests: {err}"))?;
+        self.storage
+            .save_workspace_ui(&self.current_workspace_ui_state())
+            .map_err(|err| format!("Failed to save tab workspace: {err}"))?;
+        self.workspace_ui_dirty = false;
+        Ok(())
+    }
+
+    fn close_tabs_by_id_set(&mut self, tab_ids: &BTreeSet<String>) {
+        self.open_request_tabs
+            .retain(|tab| !tab_ids.contains(&tab.id));
+        if let Some(active_tab_id) = self.active_request_tab_id.as_ref()
+            && tab_ids.contains(active_tab_id)
+        {
+            self.active_request_tab_id = self.open_request_tabs.first().map(|tab| tab.id.clone());
+        }
+    }
+
+    pub(in crate::app) fn resolve_pending_request_action(
+        &mut self,
+        save_dirty: bool,
+    ) -> Result<(), String> {
+        let Some(action) = self.pending_request_action.clone() else {
+            return Ok(());
+        };
+
+        let target_tab_ids = self.pending_request_action_target_tab_ids();
+        let dirty_tab_ids = self.pending_request_action_dirty_tab_ids();
+        if save_dirty && !dirty_tab_ids.is_empty() {
+            self.save_request_tabs(&dirty_tab_ids)?;
+        }
+
+        let target_set = target_tab_ids.into_iter().collect::<BTreeSet<_>>();
+
+        match action {
+            PendingRequestAction::CloseTab { .. } | PendingRequestAction::CloseAll => {
+                self.close_tabs_by_id_set(&target_set);
+            }
+            PendingRequestAction::DeleteActive => {
+                let endpoint_ids = self
+                    .open_request_tabs
+                    .iter()
+                    .filter(|tab| target_set.contains(&tab.id))
+                    .filter_map(|tab| tab.saved_endpoint_id.clone())
+                    .collect::<BTreeSet<_>>();
+                self.saved_endpoints
+                    .retain(|endpoint| !endpoint_ids.contains(&endpoint.id));
+                self.close_tabs_by_id_set(&target_set);
+            }
+            PendingRequestAction::DeleteAll => {
+                self.saved_endpoints.clear();
+                self.open_request_tabs.clear();
+                self.active_request_tab_id = None;
+            }
+        }
+
+        self.sync_clean_tabs_from_saved_endpoints();
+        self.ensure_selected_ids();
+        self.mark_workspace_ui_dirty();
+        self.persist_request_workspace_snapshot()?;
+        self.pending_request_action = None;
+        Ok(())
     }
 
     pub(in crate::app) fn handle_setup_password_submission(&mut self) {
@@ -516,9 +962,8 @@ impl MailmanApp {
     }
 
     pub(in crate::app) fn add_endpoint(&mut self) {
-        let id = create_id("ep");
-        self.endpoints.push(Endpoint {
-            id: id.clone(),
+        let endpoint = Endpoint {
+            id: create_id("ep"),
             source_request_id: String::new(),
             source_collection_id: String::new(),
             source_folder_id: String::new(),
@@ -532,27 +977,36 @@ impl MailmanApp {
             body_mode: "none".to_owned(),
             body: String::new(),
             scripts: vec![],
-        });
-        self.set_selected_endpoint(Some(id));
-        self.mark_dirty();
+        };
+        let tab = RequestTab {
+            id: create_id("tab"),
+            saved_endpoint_id: None,
+            draft: endpoint,
+            is_dirty: true,
+            editor_tab: RequestEditorTab::Params,
+            response_view_tab: ResponseViewTab::Pretty,
+            response: ResponseState::default(),
+            response_raw_chunks: Vec::new(),
+            parsed_response_json: None,
+            parsed_response_json_error: None,
+            scripts_ran: 0,
+            inflight_environment_id: None,
+        };
+        let tab_id = tab.id.clone();
+        self.open_request_tabs.push(tab);
+        self.activate_request_tab(Some(tab_id));
+        self.mark_workspace_ui_dirty();
     }
 
     pub(in crate::app) fn delete_selected_endpoint(&mut self) {
-        let Some(index) = self.selected_endpoint_index() else {
+        if self.active_request_tab().is_none() {
             return;
-        };
-        self.endpoints.remove(index);
-        self.set_selected_endpoint(self.endpoints.first().map(|item| item.id.clone()));
-        self.mark_dirty();
+        }
+        self.pending_request_action = Some(PendingRequestAction::DeleteActive);
     }
 
     pub(in crate::app) fn delete_all_requests(&mut self) {
-        let removed = self.endpoints.len();
-        self.endpoints.clear();
-        self.set_selected_endpoint(None);
-        self.config.selected_endpoint_id = None;
-        self.mark_dirty();
-        self.status_line = format!("Cleared {removed} requests.");
+        self.pending_request_action = Some(PendingRequestAction::DeleteAll);
     }
 
     pub(in crate::app) fn add_environment(&mut self, name: String) {
@@ -591,43 +1045,49 @@ impl MailmanApp {
     }
 
     pub(in crate::app) fn send_selected_request(&mut self) {
-        if self.in_flight {
+        if self.in_flight_tab_id.is_some() {
             return;
         }
 
-        let Some(endpoint_index) = self.selected_endpoint_index() else {
+        let Some(tab_index) = self.active_request_tab_index() else {
             self.status_line = "Select an endpoint first.".to_owned();
             return;
         };
 
-        let endpoint = self.endpoints[endpoint_index].clone();
+        let tab_id = self.open_request_tabs[tab_index].id.clone();
+        let endpoint = self.open_request_tabs[tab_index].draft.clone();
         let env_vars = self.selected_environment_variables();
         let (tx, rx) = mpsc::channel();
 
-        self.in_flight = true;
-        self.scripts_ran = 0;
-        self.inflight_environment_id = self.selected_environment_id.clone();
-        self.response.clear_for_request();
-        self.response_body_view.clear();
-        self.response_raw_chunks.clear();
-        self.parsed_response_json = None;
-        self.parsed_response_json_error = None;
+        self.in_flight_tab_id = Some(tab_id.clone());
+        self.open_request_tabs[tab_index].scripts_ran = 0;
+        self.open_request_tabs[tab_index].inflight_environment_id =
+            self.selected_environment_id.clone();
+        self.open_request_tabs[tab_index]
+            .response
+            .clear_for_request();
+        self.open_request_tabs[tab_index]
+            .response_raw_chunks
+            .clear();
+        self.open_request_tabs[tab_index].parsed_response_json = None;
+        self.open_request_tabs[tab_index].parsed_response_json_error = None;
         self.response_rx = Some(rx);
         self.status_line = format!("Sending {} {}", endpoint.method, endpoint.url);
+        self.mark_workspace_ui_dirty();
 
         thread::spawn(move || {
             let state = execute_request(endpoint, env_vars);
-            let _ = tx.send(state);
+            let _ = tx.send((tab_id, state));
         });
     }
 
     pub(in crate::app) fn copy_curl_for_selected_request(&mut self, ctx: &egui::Context) {
-        let Some(endpoint_index) = self.selected_endpoint_index() else {
+        let Some(tab_index) = self.active_request_tab_index() else {
             self.status_line = "Select an endpoint first.".to_owned();
             return;
         };
 
-        let endpoint = self.endpoints[endpoint_index].clone();
+        let endpoint = self.open_request_tabs[tab_index].draft.clone();
         let env_vars = self.selected_environment_variables();
         let curl = build_curl_command(&endpoint, &env_vars);
         ctx.copy_text(curl);
@@ -640,24 +1100,36 @@ impl MailmanApp {
         };
 
         match rx.try_recv() {
-            Ok(response_state) => {
-                self.response = response_state;
-                self.response_body_view = self.response.body.clone();
-                self.response_raw_chunks = chunk_response_body(&self.response_body_view);
-                self.update_parsed_response_json();
-                self.run_response_scripts();
-                self.in_flight = false;
+            Ok((tab_id, response_state)) => {
+                if let Some(tab_index) = self
+                    .open_request_tabs
+                    .iter()
+                    .position(|tab| tab.id == tab_id)
+                {
+                    self.open_request_tabs[tab_index].response = response_state;
+                    self.open_request_tabs[tab_index].rebuild_response_caches();
+                    self.run_response_scripts(&tab_id);
+                }
+                self.in_flight_tab_id = None;
                 self.response_rx = None;
+                self.mark_workspace_ui_dirty();
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                self.in_flight = false;
+                let in_flight_tab_id = self.in_flight_tab_id.clone();
+                self.in_flight_tab_id = None;
                 self.response_rx = None;
-                self.response.error = Some("Request worker disconnected.".to_owned());
-                self.response_body_view.clear();
-                self.response_raw_chunks.clear();
-                self.parsed_response_json = None;
-                self.parsed_response_json_error = None;
+                if let Some(tab_id) = in_flight_tab_id
+                    && let Some(tab) = self
+                        .open_request_tabs
+                        .iter_mut()
+                        .find(|tab| tab.id == tab_id)
+                {
+                    tab.response.error = Some("Request worker disconnected.".to_owned());
+                    tab.response_raw_chunks.clear();
+                    tab.parsed_response_json = None;
+                    tab.parsed_response_json_error = None;
+                }
             }
         }
     }
@@ -712,44 +1184,38 @@ impl MailmanApp {
         }
     }
 
-    pub(in crate::app) fn update_parsed_response_json(&mut self) {
-        let body = self.response.body.trim();
-        if body.is_empty() {
-            self.parsed_response_json = None;
-            self.parsed_response_json_error = None;
+    pub(in crate::app) fn run_response_scripts(&mut self, tab_id: &str) {
+        let Some(tab_index) = self
+            .open_request_tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+        else {
+            return;
+        };
+        let tab = &self.open_request_tabs[tab_index];
+
+        // Only fire on 2xx responses.
+        let Some(status) = tab.response.status_code else {
+            return;
+        };
+        if !(200..300).contains(&status) {
             return;
         }
 
-        match serde_json::from_str::<serde_json::Value>(body) {
-            Ok(value) => {
-                self.parsed_response_json = Some(value);
-                self.parsed_response_json_error = None;
-            }
-            Err(err) => {
-                self.parsed_response_json = None;
-                self.parsed_response_json_error = Some(err.to_string());
-            }
+        let scripts = tab.draft.scripts.clone();
+        if scripts.is_empty() {
+            return;
         }
-    }
 
-    pub(in crate::app) fn run_response_scripts(&mut self) {
-        // Only fire on 2xx responses.
-        let Some(status) = self.response.status_code else { return };
-        if !(200..300).contains(&status) { return }
-
-        let scripts = self
-            .selected_endpoint_index()
-            .map(|i| self.endpoints[i].scripts.clone())
-            .unwrap_or_default();
-        if scripts.is_empty() { return }
-
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&self.response.body) else {
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&tab.response.body) else {
             return;
         };
 
         // Resolve against the environment that was active at send time, not
         // the current selection — the user may have switched mid-flight.
-        let Some(target_id) = self.inflight_environment_id.clone() else { return };
+        let Some(target_id) = tab.inflight_environment_id.clone() else {
+            return;
+        };
         let Some(env_idx) = self.environments.iter().position(|e| e.id == target_id) else {
             return;
         };
@@ -757,23 +1223,37 @@ impl MailmanApp {
         let mut ran = 0usize;
         for script in &scripts {
             let path = script.extract_key.trim();
-            let var  = script.env_var.trim();
-            if path.is_empty() || var.is_empty() { continue }
+            let var = script.env_var.trim();
+            if path.is_empty() || var.is_empty() {
+                continue;
+            }
 
-            let Some(extracted) = json_path_extract(&json, path) else { continue };
+            let Some(extracted) = json_path_extract(&json, path) else {
+                continue;
+            };
 
             let env = &mut self.environments[env_idx];
             if let Some(kv) = env.variables.iter_mut().find(|kv| kv.key == var) {
                 kv.value = extracted;
             } else {
-                env.variables.push(KeyValue { key: var.to_owned(), value: extracted });
+                env.variables.push(KeyValue {
+                    key: var.to_owned(),
+                    value: extracted,
+                });
             }
             ran += 1;
         }
 
         if ran > 0 {
-            self.scripts_ran = ran;
+            if let Some(tab) = self
+                .open_request_tabs
+                .iter_mut()
+                .find(|tab| tab.id == tab_id)
+            {
+                tab.scripts_ran = ran;
+            }
             self.mark_dirty();
+            self.mark_workspace_ui_dirty();
         }
     }
 
@@ -843,7 +1323,7 @@ impl MailmanApp {
         };
 
         let mut endpoint_key_to_index = self
-            .endpoints
+            .saved_endpoints
             .iter()
             .enumerate()
             .map(|(index, endpoint)| (endpoint_dedup_key(endpoint), index))
@@ -877,13 +1357,13 @@ impl MailmanApp {
             normalize_endpoint_url_and_query_params(&mut endpoint);
             let key = endpoint_dedup_key(&endpoint);
             if let Some(existing_index) = endpoint_key_to_index.get(&key).copied() {
-                if merge_endpoint_details(&mut self.endpoints[existing_index], endpoint) {
+                if merge_endpoint_details(&mut self.saved_endpoints[existing_index], endpoint) {
                     summary.endpoints_updated += 1;
                 }
                 continue;
             }
-            endpoint_key_to_index.insert(key, self.endpoints.len());
-            self.endpoints.push(endpoint);
+            endpoint_key_to_index.insert(key, self.saved_endpoints.len());
+            self.saved_endpoints.push(endpoint);
             summary.endpoints_added += 1;
         }
 
@@ -942,8 +1422,13 @@ impl MailmanApp {
             || summary.environments_added > 0
             || summary.environment_variables_merged > 0
         {
+            self.sync_clean_tabs_from_saved_endpoints();
             self.ensure_selected_ids();
             self.mark_dirty();
+            if summary.endpoints_added > 0 || summary.endpoints_updated > 0 {
+                self.mark_workspace_ui_dirty();
+                let _ = self.storage.save_requests(&self.saved_endpoints);
+            }
         }
 
         summary
@@ -956,7 +1441,7 @@ impl MailmanApp {
     ) -> Result<(usize, usize), String> {
         let payload = SharedWorkspacePayload {
             version: 1,
-            endpoints: self.endpoints.clone(),
+            endpoints: self.saved_endpoints.clone(),
             environments: self
                 .environments
                 .iter()
@@ -987,7 +1472,7 @@ impl MailmanApp {
         }
 
         let mut seen_ids = self
-            .endpoints
+            .saved_endpoints
             .iter()
             .map(|endpoint| endpoint.id.clone())
             .collect::<BTreeSet<_>>();
@@ -1070,7 +1555,10 @@ fn find_chunk_split(s: &str, target: usize) -> usize {
             continue;
         }
         let prev = bytes[i - 1];
-        if matches!(prev, b' ' | b'\t' | b',' | b':' | b'{' | b'}' | b'[' | b']' | b'&' | b'=') {
+        if matches!(
+            prev,
+            b' ' | b'\t' | b',' | b':' | b'{' | b'}' | b'[' | b']' | b'&' | b'='
+        ) {
             return i;
         }
     }
@@ -1097,8 +1585,8 @@ fn json_path_extract(json: &serde_json::Value, path: &str) -> Option<String> {
     Some(match current {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b)   => b.to_string(),
-        serde_json::Value::Null      => "null".to_owned(),
-        other                        => other.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_owned(),
+        other => other.to_string(),
     })
 }
