@@ -1,6 +1,6 @@
 [package]
 name = "mailman"
-version = "0.5.0-alpha"
+version = "0.5.1"
 edition = "2024"
 
 [dependencies]
@@ -21,10 +21,10 @@ serde_json = "1.0.135"
 walkdir = "2.5.0"
 
 [package.metadata.packager]
-# WiX (MSI) requires numeric-only versions; override here so the installer
-# builds cleanly while [package].version retains the full semver pre-release
-# tag (used by env!("CARGO_PKG_VERSION") in the in-app version chip).
-version = "0.5.0"
+# WiX (MSI) requires numeric-only versions; override here so installer
+# packaging stays compatible while [package].version remains the canonical
+# app version shown in the UI via env!("CARGO_PKG_VERSION").
+version = "0.5.1"
 product-name = "Mailman"
 identifier = "com.mailman.mailman"
 category = "DeveloperTool"
