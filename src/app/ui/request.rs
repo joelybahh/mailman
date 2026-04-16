@@ -409,28 +409,30 @@ impl MailmanApp {
                                 }
                             }
                             RequestEditorTab::Body => {
-                                let body_mode = normalize_body_mode(&endpoint.body_mode);
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Mode").color(theme::MUTED).size(11.0));
-                                    egui::ComboBox::from_id_salt(format!("body-mode-{}", endpoint.id))
-                                        .selected_text(body_mode)
-                                        .show_ui(ui, |ui| {
-                                            for mode in BODY_MODE_OPTIONS {
-                                                if ui
-                                                    .selectable_label(
-                                                        body_mode == mode,
-                                                        mode,
-                                                    )
-                                                    .cursor_hand()
-                                                    .clicked()
-                                                {
-                                                    endpoint.body_mode = mode.to_owned();
-                                                    changed = true;
-                                                }
-                                            }
-                                        });
+                                ui.label(RichText::new("Mode").color(theme::MUTED).size(11.0));
+                                ui.add_space(2.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                    for mode in BODY_MODE_OPTIONS {
+                                        let label = match mode {
+                                            "urlencoded" => "x-www-form-urlencoded",
+                                            other => other,
+                                        };
+                                        if ui
+                                            .selectable_value(
+                                                &mut endpoint.body_mode,
+                                                mode.to_owned(),
+                                                label,
+                                            )
+                                            .cursor_hand()
+                                            .clicked()
+                                        {
+                                            changed = true;
+                                        }
+                                    }
                                 });
                                 ui.add_space(4.0);
+                                let body_mode = normalize_body_mode(&endpoint.body_mode);
                                 match body_mode {
                                     "urlencoded" => {
                                         changed |= render_body_fields_table(
