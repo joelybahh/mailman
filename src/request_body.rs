@@ -5,6 +5,8 @@ use std::path::Path;
 use reqwest::Method;
 use reqwest::blocking::multipart;
 
+use crate::models::KeyValue;
+
 pub(crate) fn computed_default_content_length(
     method: &Method,
     has_content_length_header: bool,
@@ -138,6 +140,26 @@ pub(crate) fn parse_body_fields(body: &str) -> Vec<(String, String)> {
             Some((key.to_owned(), value.trim().to_owned()))
         })
         .collect()
+}
+
+pub(crate) fn serialize_body_fields(fields: &[KeyValue], separator: &str) -> String {
+    fields
+        .iter()
+        .filter_map(|field| {
+            let key = field.key.trim();
+            if key.is_empty() {
+                return None;
+            }
+
+            let value = field.value.trim();
+            Some(if value.is_empty() {
+                key.to_owned()
+            } else {
+                format!("{key}={value}")
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
 }
 
 fn should_set_zero_content_length(method: &Method) -> bool {

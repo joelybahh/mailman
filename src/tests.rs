@@ -16,7 +16,7 @@ use crate::models::{
 };
 use crate::request_body::{
     computed_default_content_length, default_content_type_for_mode, normalize_body_mode,
-    parse_body_fields, should_add_default_content_type,
+    parse_body_fields, serialize_body_fields, should_add_default_content_type,
 };
 
 #[test]
@@ -369,6 +369,26 @@ fn parse_body_fields_supports_line_and_ampersand_separated_values() {
             ("b".to_owned(), "2".to_owned()),
             ("c".to_owned(), "3".to_owned())
         ]
+    );
+}
+
+#[test]
+fn serialize_body_fields_skips_blank_keys_and_keeps_bare_flags() {
+    let fields = vec![
+        KeyValue {
+            key: "grant_type".to_owned(),
+            value: "client_credentials".to_owned(),
+        },
+        KeyValue {
+            key: "scope".to_owned(),
+            value: String::new(),
+        },
+        KeyValue::default(),
+    ];
+
+    assert_eq!(
+        serialize_body_fields(&fields, "&"),
+        "grant_type=client_credentials&scope"
     );
 }
 
