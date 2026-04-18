@@ -16,7 +16,8 @@ use crate::models::{
 };
 use crate::request_body::{
     computed_default_content_length, default_content_type_for_mode, normalize_body_mode,
-    parse_body_fields, serialize_body_fields, should_add_default_content_type,
+    parse_body_fields, parse_body_fields_lossless, serialize_body_fields,
+    serialize_body_fields_lossless, should_add_default_content_type,
 };
 
 #[test]
@@ -389,6 +390,88 @@ fn serialize_body_fields_skips_blank_keys_and_keeps_bare_flags() {
     assert_eq!(
         serialize_body_fields(&fields, "&"),
         "grant_type=client_credentials&scope"
+    );
+}
+
+#[test]
+fn serialize_body_fields_lossless_preserves_empty_key_rows() {
+    let fields = vec![
+        KeyValue {
+            key: "grant_type".to_owned(),
+            value: "client_credentials".to_owned(),
+        },
+        KeyValue {
+            key: String::new(),
+            value: "orphan_value".to_owned(),
+        },
+        KeyValue {
+            key: "scope".to_owned(),
+            value: String::new(),
+        },
+        KeyValue::default(),
+    ];
+
+    // The lossless variant keeps the empty-key row (=orphan_value) but still
+    // drops the fully-empty trailing row.
+    assert_eq!(
+        serialize_body_fields_lossless(&fields, "&"),
+        "grant_type=client_credentials&=orphan_value&scope"
+    );
+}
+
+#[test]
+fn parse_body_fields_lossless_preserves_empty_key_rows() {
+    let body = "grant_type=client_credentials&=orphan_value&scope";
+    let fields = parse_body_fields_lossless(body);
+    assert_eq!(
+        fields,
+        vec![
+            ("grant_type".to_owned(), "client_credentials".to_owned()),
+            (String::new(), "orphan_value".to_owned()),
+            ("scope".to_owned(), String::new()),
+        ]
+    );
+}
+
+#[test]
+fn lossless_round_trip_preserves_in_progress_rows() {
+    // Simulate a user who typed a value before filling in the key.
+    let fields = vec![
+        KeyValue {
+            key: "existing".to_owned(),
+            value: "data".to_owned(),
+        },
+        KeyValue {
+            key: String::new(),
+            value: "typed_first".to_owned(),
+        },
+    ];
+
+    let serialized = serialize_body_fields_lossless(&fields, "&");
+    let parsed = parse_body_fields_lossless(&serialized);
+    let round_tripped: Vec<KeyValue> = parsed
+        .into_iter()
+        .map(|(key, value)| KeyValue { key, value })
+        .collect();
+
+    assert_eq!(round_tripped.len(), 2);
+    assert_eq!(round_tripped[0].key, "existing");
+    assert_eq!(round_tripped[0].value, "data");
+    assert_eq!(round_tripped[1].key, "");
+    assert_eq!(round_tripped[1].value, "typed_first");
+}
+
+#[test]
+fn strict_parse_still_drops_empty_keys_for_dispatch() {
+    // The strict variant used at request-send time must still skip empty keys.
+    let body = "grant_type=client_credentials&=orphan_value&scope";
+    let fields = parse_body_fields(body);
+    assert_eq!(
+        fields,
+        vec![
+            ("grant_type".to_owned(), "client_credentials".to_owned()),
+            ("scope".to_owned(), String::new()),
+        ]
     );
 }
 

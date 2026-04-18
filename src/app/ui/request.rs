@@ -5,7 +5,9 @@ use crate::domain::{method_color, resolve_endpoint_url};
 use crate::models::{
     BODY_MODE_OPTIONS, KeyValue, METHOD_OPTIONS, RequestEditorTab, ResponseScript,
 };
-use crate::request_body::{normalize_body_mode, parse_body_fields, serialize_body_fields};
+use crate::request_body::{
+    normalize_body_mode, parse_body_fields_lossless, serialize_body_fields_lossless,
+};
 
 use super::shared::{
     HandCursor, REQUEST_HEADER_BAR_HEIGHT, REQUEST_HEADER_CONTENT_PAD_Y, attach_text_context_menu,
@@ -813,7 +815,7 @@ fn render_body_fields_table(
     ui.label(RichText::new(helper_text).color(theme::MUTED).size(11.0));
     ui.add_space(4.0);
 
-    let mut fields = parse_body_fields(body)
+    let mut fields = parse_body_fields_lossless(body)
         .into_iter()
         .map(|(key, value)| KeyValue { key, value })
         .collect::<Vec<_>>();
@@ -867,7 +869,7 @@ fn render_body_fields_table(
     }
 
     if changed {
-        *body = serialize_body_fields(&fields, separator);
+        *body = serialize_body_fields_lossless(&fields, separator);
     }
 
     changed
