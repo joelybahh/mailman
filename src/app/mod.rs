@@ -569,7 +569,6 @@ impl MailmanApp {
     pub(in crate::app) fn mark_active_request_dirty(&mut self) {
         if let Some(tab) = self.active_request_tab_mut() {
             tab.is_dirty = true;
-            normalize_endpoint_url_and_query_params(&mut tab.draft);
         }
         self.mark_workspace_ui_dirty();
     }

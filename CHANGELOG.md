@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.5.1 - 16/04/2026
+
+### Improved
+
+- **Body mode toggles** — the request body mode picker now uses horizontal chip-style toggles instead of a dropdown for faster switching, closer to the Postman flow.
+- **Table-style form editors** — `x-www-form-urlencoded` now uses the same key/value table pattern as the other structured editors, and `form-data` follows the same layout for consistency.
+
+### Fixed
+
+- **Params tab editing** — blank query param rows no longer disappear while you edit them, fixing the v0.5.0 regression that made the Params tab feel broken.
+- **Key/value row width drift** — adding more params, headers, script rules, or structured body rows no longer pushes the delete action off-screen.
+
 ## v0.5.0 - 11/03/2026
 
 ### New

@@ -5,6 +5,8 @@ use std::path::Path;
 use reqwest::Method;
 use reqwest::blocking::multipart;
 
+use crate::models::KeyValue;
+
 pub(crate) fn computed_default_content_length(
     method: &Method,
     has_content_length_header: bool,
@@ -138,6 +140,64 @@ pub(crate) fn parse_body_fields(body: &str) -> Vec<(String, String)> {
             Some((key.to_owned(), value.trim().to_owned()))
         })
         .collect()
+}
+
+/// Like [`parse_body_fields`] but keeps rows whose key is empty, so that
+/// in-progress edits (value typed before a key, or a key temporarily cleared
+/// while renaming) survive a round-trip through the body string.
+pub(crate) fn parse_body_fields_lossless(body: &str) -> Vec<(String, String)> {
+    body.split(['\n', '&'])
+        .filter_map(|raw| {
+            let item = raw.trim();
+            if item.is_empty() {
+                return None;
+            }
+            let (key, value) = item.split_once('=').unwrap_or((item, ""));
+            Some((key.trim().to_owned(), value.trim().to_owned()))
+        })
+        .collect()
+}
+
+pub(crate) fn serialize_body_fields(fields: &[KeyValue], separator: &str) -> String {
+    fields
+        .iter()
+        .filter_map(|field| {
+            let key = field.key.trim();
+            if key.is_empty() {
+                return None;
+            }
+
+            let value = field.value.trim();
+            Some(if value.is_empty() {
+                key.to_owned()
+            } else {
+                format!("{key}={value}")
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+/// Like [`serialize_body_fields`] but keeps rows whose key is empty (as long
+/// as the value is non-empty), so that partially-filled table rows are not
+/// silently discarded during editing.
+pub(crate) fn serialize_body_fields_lossless(fields: &[KeyValue], separator: &str) -> String {
+    fields
+        .iter()
+        .filter_map(|field| {
+            let key = field.key.trim();
+            let value = field.value.trim();
+            if key.is_empty() && value.is_empty() {
+                return None;
+            }
+            Some(if value.is_empty() {
+                key.to_owned()
+            } else {
+                format!("{key}={value}")
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
 }
 
 fn should_set_zero_content_length(method: &Method) -> bool {

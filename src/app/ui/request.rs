@@ -5,7 +5,9 @@ use crate::domain::{method_color, resolve_endpoint_url};
 use crate::models::{
     BODY_MODE_OPTIONS, KeyValue, METHOD_OPTIONS, RequestEditorTab, ResponseScript,
 };
-use crate::request_body::normalize_body_mode;
+use crate::request_body::{
+    normalize_body_mode, parse_body_fields_lossless, serialize_body_fields_lossless,
+};
 
 use super::shared::{
     HandCursor, REQUEST_HEADER_BAR_HEIGHT, REQUEST_HEADER_CONTENT_PAD_Y, attach_text_context_menu,
@@ -248,6 +250,10 @@ impl MailmanApp {
 
                         match request_editor_tab {
                             RequestEditorTab::Params => {
+                                let (key_w, val_w, rm_w) = kv_row_widths(
+                                    ui.available_width(),
+                                    ui.spacing().item_spacing.x,
+                                );
                                 ui.label(
                                     RichText::new(
                                         "Query params are appended to the URL when sending.",
@@ -259,7 +265,6 @@ impl MailmanApp {
                                 for (param_index, param) in endpoint.query_params.iter_mut().enumerate()
                                 {
                                     ui.horizontal(|ui| {
-                                        let (key_w, val_w, rm_w) = kv_row_widths(ui);
                                         let r = ui.add(
                                             TextEdit::singleline(&mut param.key)
                                                 .desired_width(key_w)
@@ -298,6 +303,10 @@ impl MailmanApp {
                                 }
                             }
                             RequestEditorTab::Headers => {
+                                let (key_w, val_w, rm_w) = kv_row_widths(
+                                    ui.available_width(),
+                                    ui.spacing().item_spacing.x,
+                                );
                                 ui.label(
                                     RichText::new("Example: Authorization = Bearer ${token}")
                                         .color(theme::MUTED)
@@ -307,7 +316,6 @@ impl MailmanApp {
                                 for (header_index, header) in endpoint.headers.iter_mut().enumerate()
                                 {
                                     ui.horizontal(|ui| {
-                                        let (key_w, val_w, rm_w) = kv_row_widths(ui);
                                         let r = ui.add(
                                             TextEdit::singleline(&mut header.key)
                                                 .desired_width(key_w)
@@ -346,6 +354,10 @@ impl MailmanApp {
                                 }
                             }
                             RequestEditorTab::Scripts => {
+                                let (key_w, val_w, rm_w) = kv_row_widths(
+                                    ui.available_width(),
+                                    ui.spacing().item_spacing.x,
+                                );
                                 ui.label(
                                     RichText::new(
                                         "After a 2xx response, each rule extracts a value from the JSON body and writes it to an env variable.",
@@ -357,7 +369,6 @@ impl MailmanApp {
                                 for (script_index, script) in endpoint.scripts.iter_mut().enumerate()
                                 {
                                     ui.horizontal(|ui| {
-                                        let (key_w, val_w, rm_w) = kv_row_widths(ui);
                                         let r = ui.add(
                                             TextEdit::singleline(&mut script.extract_key)
                                                 .desired_width(key_w)
@@ -400,38 +411,76 @@ impl MailmanApp {
                                 }
                             }
                             RequestEditorTab::Body => {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Mode").color(theme::MUTED).size(11.0));
-                                    egui::ComboBox::from_id_salt(format!("body-mode-{}", endpoint.id))
-                                        .selected_text(normalize_body_mode(&endpoint.body_mode))
-                                        .show_ui(ui, |ui| {
-                                            for mode in BODY_MODE_OPTIONS {
-                                                if ui
-                                                    .selectable_label(
-                                                        normalize_body_mode(&endpoint.body_mode)
-                                                            == mode,
-                                                        mode,
-                                                    )
-                                                    .cursor_hand()
-                                                    .clicked()
-                                                {
-                                                    endpoint.body_mode = mode.to_owned();
-                                                    changed = true;
-                                                }
-                                            }
-                                        });
+                                ui.label(RichText::new("Mode").color(theme::MUTED).size(11.0));
+                                ui.add_space(2.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                    for mode in BODY_MODE_OPTIONS {
+                                        let label = match mode {
+                                            "urlencoded" => "x-www-form-urlencoded",
+                                            other => other,
+                                        };
+                                        if ui
+                                            .selectable_value(
+                                                &mut endpoint.body_mode,
+                                                mode.to_owned(),
+                                                label,
+                                            )
+                                            .cursor_hand()
+                                            .clicked()
+                                        {
+                                            changed = true;
+                                        }
+                                    }
                                 });
                                 ui.add_space(4.0);
-                                let r = ui.add(
-                                    TextEdit::multiline(&mut endpoint.body)
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(12)
-                                        .code_editor()
-                                        .hint_text("{\n  \"key\": \"${value}\"\n}"),
-                                );
-                                attach_text_context_menu(&r, &endpoint.body, true);
-                                if r.changed() {
-                                    changed = true;
+                                let body_mode = normalize_body_mode(&endpoint.body_mode);
+                                match body_mode {
+                                    "urlencoded" => {
+                                        changed |= render_body_fields_table(
+                                            ui,
+                                            &mut endpoint.body,
+                                            "&",
+                                            "Use the empty row to add URL-encoded fields.",
+                                            "value",
+                                        );
+                                    }
+                                    "form-data" => {
+                                        changed |= render_body_fields_table(
+                                            ui,
+                                            &mut endpoint.body,
+                                            "\n",
+                                            "Use @/path/to/file in the value column to upload a file.",
+                                            "value or @/path/to/file",
+                                        );
+                                    }
+                                    "binary" => {
+                                        let r = ui.add(
+                                            TextEdit::multiline(&mut endpoint.body)
+                                                .desired_width(f32::INFINITY)
+                                                .desired_rows(12)
+                                                .code_editor()
+                                                .hint_text("@/tmp/payload.bin"),
+                                        );
+                                        attach_text_context_menu(&r, &endpoint.body, true);
+                                        if r.changed() {
+                                            changed = true;
+                                        }
+                                    }
+                                    "none" | "raw" => {
+                                        let r = ui.add(
+                                            TextEdit::multiline(&mut endpoint.body)
+                                                .desired_width(f32::INFINITY)
+                                                .desired_rows(12)
+                                                .code_editor()
+                                                .hint_text("{\n  \"key\": \"${value}\"\n}"),
+                                        );
+                                        attach_text_context_menu(&r, &endpoint.body, true);
+                                        if r.changed() {
+                                            changed = true;
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -748,11 +797,80 @@ impl MailmanApp {
     }
 }
 
-fn kv_row_widths(ui: &egui::Ui) -> (f32, f32, f32) {
-    let row_width = ui.available_width();
-    let spacing = ui.spacing().item_spacing.x;
+fn kv_row_widths(row_width: f32, spacing: f32) -> (f32, f32, f32) {
     let remove_width = 28.0_f32;
     let key_width = (row_width * 0.35).clamp(100.0, 240.0);
     let value_width = (row_width - key_width - remove_width - spacing * 2.0).max(100.0);
     (key_width, value_width, remove_width)
+}
+
+fn render_body_fields_table(
+    ui: &mut egui::Ui,
+    body: &mut String,
+    separator: &str,
+    helper_text: &str,
+    value_hint: &str,
+) -> bool {
+    let (key_w, val_w, rm_w) = kv_row_widths(ui.available_width(), ui.spacing().item_spacing.x);
+    ui.label(RichText::new(helper_text).color(theme::MUTED).size(11.0));
+    ui.add_space(4.0);
+
+    let mut fields = parse_body_fields_lossless(body)
+        .into_iter()
+        .map(|(key, value)| KeyValue { key, value })
+        .collect::<Vec<_>>();
+    fields.push(KeyValue::default());
+
+    let mut changed = false;
+    let mut remove_index = None;
+    let last_index = fields.len().saturating_sub(1);
+
+    for (field_index, field) in fields.iter_mut().enumerate() {
+        let is_trailing_blank = field_index == last_index
+            && field.key.trim().is_empty()
+            && field.value.trim().is_empty();
+
+        ui.horizontal(|ui| {
+            let r = ui.add(
+                TextEdit::singleline(&mut field.key)
+                    .desired_width(key_w)
+                    .hint_text("key"),
+            );
+            attach_text_context_menu(&r, &field.key, true);
+            if r.changed() {
+                changed = true;
+            }
+
+            let r = ui.add(
+                TextEdit::singleline(&mut field.value)
+                    .desired_width(val_w)
+                    .hint_text(value_hint),
+            );
+            attach_text_context_menu(&r, &field.value, true);
+            if r.changed() {
+                changed = true;
+            }
+
+            if is_trailing_blank {
+                ui.add_space(rm_w);
+            } else if ui
+                .add(egui::Button::new("x").min_size(egui::vec2(rm_w, 0.0)))
+                .cursor_hand()
+                .clicked()
+            {
+                remove_index = Some(field_index);
+            }
+        });
+    }
+
+    if let Some(remove_index) = remove_index {
+        fields.remove(remove_index);
+        changed = true;
+    }
+
+    if changed {
+        *body = serialize_body_fields_lossless(&fields, separator);
+    }
+
+    changed
 }
