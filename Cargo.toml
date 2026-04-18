@@ -1,6 +1,6 @@
 [package]
 name = "mailman"
-version = "0.5.1"
+version = "0.5.1-alpha"
 edition = "2024"
 
 [dependencies]
